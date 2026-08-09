@@ -123,8 +123,27 @@ func SetTeeAddress(s *support.Support, instructionSenderAddress, teeAddress comm
 	return waitOK(s, tx, "setTeeAddress")
 }
 
-// CreateAuction creates an auction and returns its id.
-func CreateAuction(s *support.Support, instructionSenderAddress common.Address, lot string, payToken common.Address, deadline uint64, reservePrice *big.Int) (*big.Int, error) {
+// Lot kinds, matching SealedAuction.LotKind.
+const (
+	LotKindERC721 uint8 = 0
+	LotKindERC20  uint8 = 1
+)
+
+// CreateAuction creates an auction and returns its id. The lot is pulled into
+// escrow in the same transaction, so the seller must have approved
+// `instructionSenderAddress` on `lotToken` first.
+func CreateAuction(
+	s *support.Support,
+	instructionSenderAddress common.Address,
+	lot string,
+	lotKind uint8,
+	lotToken common.Address,
+	lotTokenId *big.Int,
+	lotAmount *big.Int,
+	payToken common.Address,
+	deadline uint64,
+	reservePrice *big.Int,
+) (*big.Int, error) {
 	sender, err := sealedauction.NewSealedAuction(instructionSenderAddress, s.ChainClient)
 	if err != nil {
 		return nil, errors.Errorf("failed to bind contract: %s", err)
@@ -134,7 +153,9 @@ func CreateAuction(s *support.Support, instructionSenderAddress common.Address, 
 		return nil, errors.Errorf("failed to create transactor: %s", err)
 	}
 
-	tx, err := sender.CreateAuction(opts, lot, payToken, deadline, reservePrice)
+	tx, err := sender.CreateAuction(
+		opts, lot, lotKind, lotToken, lotTokenId, lotAmount, payToken, deadline, reservePrice,
+	)
 	if err != nil {
 		return nil, errors.Errorf("failed to call createAuction: %s", err)
 	}

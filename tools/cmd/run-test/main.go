@@ -89,6 +89,13 @@ func main() {
 		logger.Infof("Using PAY_TOKEN from env: %s", payToken.Hex())
 	}
 
+	demoAssetHex := os.Getenv("DEMO_ASSET")
+	if demoAssetHex == "" {
+		fccutils.FatalWithCause(errors.New(
+			"DEMO_ASSET env var not set — deploy contracts/DemoAsset721.sol and set its address (the deployer must own it)"))
+	}
+	demoAsset := common.HexToAddress(demoAssetHex)
+
 	balance, err := instrutils.TokenBalanceOf(testSupport.ChainClient, payToken, deployer)
 	if err != nil {
 		fccutils.FatalWithCause(errors.Errorf("pay-token balanceOf(deployer): %s", err))
@@ -134,7 +141,9 @@ func main() {
 	}
 	bidder2 := gethcrypto.PubkeyToAddress(bidder2Prv.PublicKey)
 	logger.Infof("Funding second bidder %s with gas money...", bidder2.Hex())
-	if err := instrutils.SendNative(testSupport, bidder2, big.NewInt(500_000_000_000_000_000)); err != nil {
+	// Coston2 gas is ~650 gwei and this key runs approve + create + bid, so
+	// fund it generously — leftovers are swept back at the end of the run.
+	if err := instrutils.SendNative(testSupport, bidder2, big.NewInt(3_000_000_000_000_000_000)); err != nil {
 		fccutils.FatalWithCause(errors.Errorf("fund second bidder: %s", err))
 	}
 	bidder2Support, err := support.NewSupport(bidder2Prv, testSupport.ChainClient, testSupport.Addresses)
@@ -150,15 +159,44 @@ func main() {
 		fccutils.FatalWithCause(errors.Errorf("fetch chain head: %s", err))
 	}
 	deadline := head.Time + uint64(*biddingSeconds)
+
+	// The lot is a real ERC-721 held in escrow. The deployer owns DemoAsset721,
+	// so it mints the token and hands it to the ephemeral seller, who approves
+	// the auction house and creates the auction.
+	logger.Infof("Minting a demo NFT to seller %s...", bidder2.Hex())
+	lotTokenId, err := instrutils.MintDemoAsset(testSupport, demoAsset, bidder2)
+	if err != nil {
+		fccutils.FatalWithCause(errors.Errorf("mint demo asset: %s", err))
+	}
+	logger.Infof("Minted token id %s", lotTokenId)
+
+	if err := instrutils.ApproveNFT(bidder2Support, demoAsset, instructionSenderAddress, lotTokenId); err != nil {
+		fccutils.FatalWithCause(errors.Errorf("approve lot: %s", err))
+	}
+
 	logger.Infof("Creating auction as seller %s (deadline in %ds, reserve %d)...", bidder2.Hex(), *biddingSeconds, *reserveWei)
 	auctionId, err := instrutils.CreateAuction(
 		bidder2Support, instructionSenderAddress,
-		"Sealed-auction e2e test lot", payToken, deadline, big.NewInt(*reserveWei),
+		"Sealed-auction e2e test lot (escrowed NFT)",
+		instrutils.LotKindERC721, demoAsset, lotTokenId, big.NewInt(0),
+		payToken, deadline, big.NewInt(*reserveWei),
 	)
 	if err != nil {
 		fccutils.FatalWithCause(err)
 	}
 	logger.Infof("Auction created. ID: %s", auctionId)
+
+	// The lot must be in escrow now — that is what makes the auction real.
+	lotHolder, err := instrutils.NFTOwner(testSupport, demoAsset, lotTokenId)
+	if err != nil {
+		fccutils.FatalWithCause(err)
+	}
+	if lotHolder != instructionSenderAddress {
+		fccutils.FatalWithCause(errors.Errorf(
+			"expected the lot to be escrowed by %s, but it is held by %s",
+			instructionSenderAddress.Hex(), lotHolder.Hex()))
+	}
+	logger.Infof("Test passed: lot escrowed by the auction contract")
 
 	// --- Test case 2: sealed PLACE_BID from two distinct bidders --------------
 	teePub, err := fccutils.TeeECIESPublicKey(*pf)
@@ -298,6 +336,17 @@ func main() {
 			"expected seller to hold the clearing price %s, got %s", clearingPrice, sellerBalance))
 	}
 	logger.Infof("Test passed: seller received %s pay-token units", sellerBalance)
+
+	// The other half of the atomic swap: the lot is now the winner's.
+	lotHolder, err = instrutils.NFTOwner(testSupport, demoAsset, lotTokenId)
+	if err != nil {
+		fccutils.FatalWithCause(err)
+	}
+	if lotHolder != winner {
+		fccutils.FatalWithCause(errors.Errorf(
+			"expected the lot to be owned by the winner %s, got %s", winner.Hex(), lotHolder.Hex()))
+	}
+	logger.Infof("Test passed: lot token %s transferred to the winner", lotTokenId)
 
 	// Recover the pay tokens from the ephemeral seller so repeated runs don't
 	// bleed the deployer's balance.

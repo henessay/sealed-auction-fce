@@ -13,7 +13,13 @@ export const RPC_URL =
 
 export const SEALED_AUCTION_ADDRESS = addressFromEnv(
   process.env.NEXT_PUBLIC_SEALED_AUCTION,
-  "0x5a468D17C292C262C4bAa0A953561bF31CDA79a0",
+  "0x057c49831762029EA82c5644ff9D426D02486EeB",
+);
+
+/** contracts/DemoAsset721.sol — used by the "mint demo NFT" helper. */
+export const DEMO_ASSET_ADDRESS = addressFromEnv(
+  process.env.NEXT_PUBLIC_DEMO_ASSET,
+  "0x6F7640AcbdCA0dfc4817C660928d02d0B3B6011E",
 );
 
 export const FLARE_TEE_MANAGER_ADDRESS = addressFromEnv(

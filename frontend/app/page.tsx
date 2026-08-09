@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { AuctionList } from "@/components/AuctionList";
 import { CreateAuctionForm } from "@/components/CreateAuctionForm";
+import { MintDemoAsset } from "@/components/MintDemoAsset";
 import { VerifyPanel } from "@/components/VerifyPanel";
 
 export default function Home() {
@@ -19,12 +20,16 @@ export default function Home() {
       </div>
       <aside className="space-y-4 lg:order-none">
         <VerifyPanel />
+        <MintDemoAsset />
         <section className="panel p-4 text-xs leading-relaxed text-[var(--muted)]">
           <h2 className="mb-2 text-sm font-semibold text-[var(--text)]">
             How it works
           </h2>
           <ol className="list-inside list-decimal space-y-1">
-            <li>Seller creates an auction with an ERC-20 pay token (FXRP).</li>
+            <li>
+              Seller escrows the lot (an NFT or tokens) into the contract and
+              names an ERC-20 pay token (FXRP).
+            </li>
             <li>
               Bids are ECIES-encrypted in the browser under the TEE key — the
               chain only sees ciphertext and a commitment.
@@ -34,8 +39,8 @@ export default function Home() {
               bids in memory and signs the winner.
             </li>
             <li>
-              settle() verifies the TEE signature on-chain and pulls the
-              winner&apos;s payment to the seller.
+              settle() verifies the TEE signature and swaps atomically: payment
+              to the seller, lot to the winner — or nothing at all.
             </li>
           </ol>
         </section>

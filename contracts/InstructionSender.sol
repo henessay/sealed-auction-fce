@@ -5,9 +5,17 @@ pragma solidity ^0.8.27;
 import { ITeeExtensionRegistry } from "./interfaces/ITeeExtensionRegistry.sol";
 import { ITeeMachineRegistry } from "./interfaces/ITeeMachineRegistry.sol";
 
-/// @notice Minimal ERC-20 surface used for winner payment.
+/// @notice Minimal ERC-20 surface used for winner payment and ERC-20 lots.
 interface IERC20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+/// @notice Minimal ERC-721 surface used for NFT lots.
+interface IERC721 {
+    function transferFrom(address from, address to, uint256 tokenId) external;
+    function ownerOf(uint256 tokenId) external view returns (address);
 }
 
 /// @title SealedAuction
@@ -76,10 +84,22 @@ contract SealedAuction {
         Cancelled
     }
 
+    /// @notice What kind of token the escrowed lot is.
+    enum LotKind {
+        ERC721,
+        ERC20
+    }
+
     /// @notice One sealed-bid auction. Amounts are in `payToken` units.
+    /// The lot itself is held in escrow by this contract from creation until
+    /// settlement or cancellation.
     struct Auction {
         address seller;
-        string lot;             // off-chain lot description (demo scope)
+        string lot;             // human-readable metadata alongside the escrowed token
+        LotKind lotKind;
+        address lotToken;       // ERC-721 or ERC-20 contract holding the lot
+        uint256 lotTokenId;     // ERC-721 only
+        uint256 lotAmount;      // ERC-20 only (amount actually received into escrow)
         IERC20 payToken;        // ERC-20 used for the winner's payment
         uint64 deadline;        // bidding closes at this unix timestamp
         uint256 reservePrice;   // public; 0 = no reserve
@@ -126,6 +146,16 @@ contract SealedAuction {
         uint256 reservePrice,
         string lot
     );
+    /// @notice Emitted once the lot has been pulled into escrow.
+    event LotEscrowed(
+        uint256 indexed auctionId,
+        LotKind lotKind,
+        address indexed lotToken,
+        uint256 lotTokenId,
+        uint256 lotAmount
+    );
+    /// @notice Emitted when an escrowed lot leaves this contract.
+    event LotReleased(uint256 indexed auctionId, address indexed to);
     /// @notice Emitted per bid. Deliberately carries NO amount.
     event BidPlaced(uint256 indexed auctionId, address indexed bidder, bytes32 commitment, bytes32 instructionId);
     event AuctionClosing(uint256 indexed auctionId, bytes32 instructionId);
@@ -136,6 +166,17 @@ contract SealedAuction {
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
         _;
+    }
+
+    uint256 private _entered;
+
+    /// @notice Guards the functions that move escrowed assets. State is always
+    /// written before any token call, so this is defense in depth.
+    modifier nonReentrant() {
+        require(_entered == 0, "reentrant");
+        _entered = 1;
+        _;
+        _entered = 0;
     }
 
     /// @notice Initializes the contract with registry addresses.
@@ -178,26 +219,45 @@ contract SealedAuction {
 
     // --- Auction lifecycle ---
 
-    /// @notice Create an auction. The lot is an off-chain description string
-    ///         (demo scope); payment settles in `_payToken`.
-    /// @param _lot Human-readable description of what is being sold.
+    /// @notice Create an auction and escrow the lot in the same transaction.
+    ///         The seller must have approved this contract on `_lotToken`
+    ///         first; if the pull fails, no auction exists.
+    /// @param _lot Human-readable description, kept as metadata alongside the token.
+    /// @param _lotKind ERC721 (uses `_lotTokenId`) or ERC20 (uses `_lotAmount`).
+    /// @param _lotToken The token contract holding the lot.
+    /// @param _lotTokenId ERC-721 token id; ignored for ERC-20 lots.
+    /// @param _lotAmount ERC-20 amount; ignored for ERC-721 lots.
     /// @param _payToken ERC-20 the winner pays in (e.g. FXRP on Coston2).
     /// @param _deadline Unix timestamp after which bidding closes.
     /// @param _reservePrice Minimum winning bid; 0 = no reserve. Public by design (v1).
     function createAuction(
         string calldata _lot,
+        LotKind _lotKind,
+        address _lotToken,
+        uint256 _lotTokenId,
+        uint256 _lotAmount,
         IERC20 _payToken,
         uint64 _deadline,
         uint256 _reservePrice
-    ) external returns (uint256 auctionId) {
+    ) external nonReentrant returns (uint256 auctionId) {
         require(address(_payToken) != address(0), "zero pay token");
+        require(_lotToken != address(0), "zero lot token");
         require(_deadline > block.timestamp, "deadline in the past");
         require(bytes(_lot).length > 0, "lot required");
+
+        // Pull the lot into escrow first: a failed pull must leave no auction
+        // behind. `escrowed` is what actually landed here (ERC-20 lots may be
+        // fee-on-transfer), so the winner receives exactly what is held.
+        uint256 escrowed = _pullLot(_lotKind, _lotToken, _lotTokenId, _lotAmount);
 
         auctionId = auctions.length;
         auctions.push(Auction({
             seller: msg.sender,
             lot: _lot,
+            lotKind: _lotKind,
+            lotToken: _lotToken,
+            lotTokenId: _lotTokenId,
+            lotAmount: escrowed,
             payToken: _payToken,
             deadline: _deadline,
             reservePrice: _reservePrice,
@@ -208,6 +268,7 @@ contract SealedAuction {
         }));
 
         emit AuctionCreated(auctionId, msg.sender, address(_payToken), _deadline, _reservePrice, _lot);
+        emit LotEscrowed(auctionId, _lotKind, _lotToken, _lotTokenId, escrowed);
     }
 
     /// @notice Submit a sealed bid as ECIES ciphertext. The bid amount never
@@ -267,13 +328,15 @@ contract SealedAuction {
     }
 
     /// @notice Seller cancels a bidless auction before anyone commits funds.
-    function cancelAuction(uint256 _auctionId) external {
+    ///         The escrowed lot goes straight back to the seller.
+    function cancelAuction(uint256 _auctionId) external nonReentrant {
         Auction storage a = _getAuction(_auctionId);
         require(msg.sender == a.seller, "not seller");
         require(a.state == AuctionState.Open, "auction not open");
         require(a.bidCount == 0, "bids exist");
 
         a.state = AuctionState.Cancelled;
+        _releaseLot(_auctionId, a, a.seller);
         emit AuctionCancelled(_auctionId);
     }
 
@@ -306,7 +369,7 @@ contract SealedAuction {
         string calldata _submissionTag,
         uint8 _status,
         bytes calldata _signature
-    ) external {
+    ) external nonReentrant {
         require(teeAddress != address(0), "TEE address not set");
         require(_status == 1, "TEE reported failure");
 
@@ -338,8 +401,10 @@ contract SealedAuction {
         Auction storage a = _getAuction(auctionId);
         require(a.state == AuctionState.Closing, "auction not closing");
 
+        // No bid met the reserve: nothing is paid and the lot goes home.
         if (winner == address(0)) {
             a.state = AuctionState.Cancelled;
+            _releaseLot(auctionId, a, a.seller);
             emit AuctionCancelled(auctionId);
             return;
         }
@@ -351,10 +416,19 @@ contract SealedAuction {
         a.winner = winner;
         a.clearingPrice = clearingPrice;
 
+        // Atomic swap. Both legs run in this transaction: if either reverts —
+        // winner short on pay tokens, allowance revoked, lot transfer refused —
+        // the whole settlement reverts and the escrow stays intact.
         // First public reveal: winner and clearing price. Losing bids stay sealed.
         require(a.payToken.transferFrom(winner, a.seller, clearingPrice), "payment failed");
+        _releaseLot(auctionId, a, winner);
 
         emit AuctionSettled(auctionId, winner, clearingPrice);
+    }
+
+    /// @notice Accept ERC-721 lots pushed in via safeTransferFrom.
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return this.onERC721Received.selector;
     }
 
     // --- Views ---
@@ -374,6 +448,45 @@ contract SealedAuction {
     function _getAuction(uint256 _auctionId) internal view returns (Auction storage) {
         require(_auctionId < auctions.length, "no such auction");
         return auctions[_auctionId];
+    }
+
+    /// @notice Move the lot from the seller into this contract's escrow.
+    /// @return The amount now held (the token id count is always 1 for ERC-721).
+    function _pullLot(
+        LotKind _lotKind,
+        address _lotToken,
+        uint256 _lotTokenId,
+        uint256 _lotAmount
+    ) private returns (uint256) {
+        if (_lotKind == LotKind.ERC721) {
+            IERC721(_lotToken).transferFrom(msg.sender, address(this), _lotTokenId);
+            require(IERC721(_lotToken).ownerOf(_lotTokenId) == address(this), "lot escrow failed");
+            return 1;
+        }
+
+        require(_lotAmount > 0, "zero lot amount");
+        uint256 before = IERC20(_lotToken).balanceOf(address(this));
+        require(
+            IERC20(_lotToken).transferFrom(msg.sender, address(this), _lotAmount),
+            "lot escrow failed"
+        );
+        uint256 received = IERC20(_lotToken).balanceOf(address(this)) - before;
+        require(received > 0, "lot escrow failed");
+        return received;
+    }
+
+    /// @notice Send an escrowed lot to `_to`. Callers must have written the
+    ///         terminal state first — this makes external calls.
+    /// @dev Uses plain `transferFrom` for ERC-721 rather than `safeTransferFrom`:
+    ///      a winner contract without `onERC721Received` would otherwise be able
+    ///      to block settlement permanently.
+    function _releaseLot(uint256 _auctionId, Auction storage _a, address _to) private {
+        if (_a.lotKind == LotKind.ERC721) {
+            IERC721(_a.lotToken).transferFrom(address(this), _to, _a.lotTokenId);
+        } else {
+            require(IERC20(_a.lotToken).transfer(_to, _a.lotAmount), "lot release failed");
+        }
+        emit LotReleased(_auctionId, _to);
     }
 
     /// @notice Route an AUCTION instruction to one randomly-assigned TEE.

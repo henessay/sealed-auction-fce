@@ -3,6 +3,7 @@ pragma solidity ^0.8.27;
 
 import { Test } from "forge-std/Test.sol";
 import { SealedAuction, IERC20 } from "../contracts/InstructionSender.sol";
+import { DemoAsset721 } from "../contracts/DemoAsset721.sol";
 import { ITeeExtensionRegistry } from "../contracts/interfaces/ITeeExtensionRegistry.sol";
 import { ITeeMachineRegistry } from "../contracts/interfaces/ITeeMachineRegistry.sol";
 import { MockERC20, MockTeeExtensionRegistry, MockTeeMachineRegistry } from "./Mocks.sol";
@@ -12,6 +13,8 @@ contract SealedAuctionTest is Test {
     MockTeeExtensionRegistry internal extensionRegistry;
     MockTeeMachineRegistry internal machineRegistry;
     MockERC20 internal token;
+    DemoAsset721 internal asset;
+    MockERC20 internal lotToken;
 
     uint256 internal constant TEE_PK = 0xA11CE;
     address internal teeSigner;
@@ -26,6 +29,8 @@ contract SealedAuctionTest is Test {
         extensionRegistry = new MockTeeExtensionRegistry();
         machineRegistry = new MockTeeMachineRegistry();
         token = new MockERC20();
+        lotToken = new MockERC20();
+        asset = new DemoAsset721();
         teeSigner = vm.addr(TEE_PK);
 
         auctionHouse = new SealedAuction(
@@ -44,9 +49,44 @@ contract SealedAuctionTest is Test {
 
     // --- helpers ---
 
-    function createAuction(uint256 reserve) internal returns (uint256) {
+    /// Mints an NFT to the seller and approves the auction house for it.
+    function mintLot() internal returns (uint256 tokenId) {
+        tokenId = asset.mint(seller);
         vm.prank(seller);
-        return auctionHouse.createAuction("A rare artifact", IERC20(address(token)), deadline, reserve);
+        asset.approve(address(auctionHouse), tokenId);
+    }
+
+    /// Default auction: a fresh ERC-721 lot escrowed on creation.
+    function createAuction(uint256 reserve) internal returns (uint256 id) {
+        uint256 tokenId = mintLot();
+        vm.prank(seller);
+        id = auctionHouse.createAuction(
+            "A rare artifact",
+            SealedAuction.LotKind.ERC721,
+            address(asset),
+            tokenId,
+            0,
+            IERC20(address(token)),
+            deadline,
+            reserve
+        );
+    }
+
+    function createErc20LotAuction(uint256 lotAmount, uint256 reserve) internal returns (uint256 id) {
+        lotToken.mint(seller, lotAmount);
+        vm.startPrank(seller);
+        lotToken.approve(address(auctionHouse), lotAmount);
+        id = auctionHouse.createAuction(
+            "A pile of tokens",
+            SealedAuction.LotKind.ERC20,
+            address(lotToken),
+            0,
+            lotAmount,
+            IERC20(address(token)),
+            deadline,
+            reserve
+        );
+        vm.stopPrank();
     }
 
     /// Mirrors the TEE node's ActionResult signing scheme (go-flare-common signing.TEEActionResult).
@@ -84,24 +124,91 @@ contract SealedAuctionTest is Test {
     }
 
     function auctionState(uint256 auctionId) internal view returns (SealedAuction.AuctionState st) {
-        (,,,,, st,,,) = auctionHouse.auctions(auctionId);
+        (,,,,,,,,, st,,,) = auctionHouse.auctions(auctionId);
     }
 
-    // --- createAuction / placeBid / cancel ---
+    function auctionOutcome(uint256 auctionId) internal view returns (address winner, uint256 price) {
+        (,,,,,,,,,, winner, price,) = auctionHouse.auctions(auctionId);
+    }
 
-    function test_CreateAuction() public {
+    function lotTokenId(uint256 auctionId) internal view returns (uint256 id) {
+        (,,,, id,,,,,,,,) = auctionHouse.auctions(auctionId);
+    }
+
+    // --- createAuction: escrow ---
+
+    function test_CreateAuction_EscrowsErc721Lot() public {
         uint256 id = createAuction(10 ether);
         assertEq(id, 0);
         assertEq(auctionHouse.auctionCount(), 1);
         assertTrue(auctionState(id) == SealedAuction.AuctionState.Open);
+
+        // The lot left the seller and is held by the auction house.
+        assertEq(asset.ownerOf(lotTokenId(id)), address(auctionHouse));
+        assertEq(asset.balanceOf(seller), 0);
+        assertEq(asset.balanceOf(address(auctionHouse)), 1);
+    }
+
+    function test_CreateAuction_EscrowsErc20Lot() public {
+        uint256 id = createErc20LotAuction(250 ether, 0);
+
+        assertEq(lotToken.balanceOf(address(auctionHouse)), 250 ether);
+        assertEq(lotToken.balanceOf(seller), 0);
+        (,,,,, uint256 lotAmount,,,,,,,) = auctionHouse.auctions(id);
+        assertEq(lotAmount, 250 ether);
+    }
+
+    function test_CreateAuction_RevertsWithoutLotApproval() public {
+        uint256 tokenId = asset.mint(seller); // no approve
+        vm.prank(seller);
+        vm.expectRevert("not authorized");
+        auctionHouse.createAuction(
+            "unapproved",
+            SealedAuction.LotKind.ERC721,
+            address(asset),
+            tokenId,
+            0,
+            IERC20(address(token)),
+            deadline,
+            0
+        );
+        // No auction was recorded.
+        assertEq(auctionHouse.auctionCount(), 0);
     }
 
     function test_CreateAuction_RevertsOnPastDeadline() public {
+        uint256 tokenId = mintLot();
         vm.warp(deadline + 1);
         vm.prank(seller);
         vm.expectRevert("deadline in the past");
-        auctionHouse.createAuction("lot", IERC20(address(token)), deadline, 0);
+        auctionHouse.createAuction(
+            "lot",
+            SealedAuction.LotKind.ERC721,
+            address(asset),
+            tokenId,
+            0,
+            IERC20(address(token)),
+            deadline,
+            0
+        );
     }
+
+    function test_CreateAuction_RevertsOnZeroErc20LotAmount() public {
+        vm.prank(seller);
+        vm.expectRevert("zero lot amount");
+        auctionHouse.createAuction(
+            "empty",
+            SealedAuction.LotKind.ERC20,
+            address(lotToken),
+            0,
+            0,
+            IERC20(address(token)),
+            deadline,
+            0
+        );
+    }
+
+    // --- placeBid / cancel ---
 
     function test_PlaceBid_EmitsCommitmentWithoutAmount() public {
         uint256 id = createAuction(0);
@@ -137,8 +244,9 @@ contract SealedAuctionTest is Test {
         auctionHouse.placeBid(id, "");
     }
 
-    function test_CancelAuction_OnlyBidlessAndSeller() public {
+    function test_CancelAuction_ReturnsLotToSeller() public {
         uint256 id = createAuction(0);
+        uint256 tokenId = lotTokenId(id);
 
         vm.prank(bidder1);
         vm.expectRevert("not seller");
@@ -147,11 +255,20 @@ contract SealedAuctionTest is Test {
         vm.prank(seller);
         auctionHouse.cancelAuction(id);
         assertTrue(auctionState(id) == SealedAuction.AuctionState.Cancelled);
+        assertEq(asset.ownerOf(tokenId), seller);
 
         // A cancelled auction takes no bids.
         vm.prank(bidder1);
         vm.expectRevert("auction not open");
         auctionHouse.placeBid(id, hex"01");
+    }
+
+    function test_CancelAuction_ReturnsErc20Lot() public {
+        uint256 id = createErc20LotAuction(120 ether, 0);
+        vm.prank(seller);
+        auctionHouse.cancelAuction(id);
+        assertEq(lotToken.balanceOf(seller), 120 ether);
+        assertEq(lotToken.balanceOf(address(auctionHouse)), 0);
     }
 
     function test_CancelAuction_RevertsWithBids() public {
@@ -192,10 +309,11 @@ contract SealedAuctionTest is Test {
         assertTrue(auctionState(id) == SealedAuction.AuctionState.Closing);
     }
 
-    // --- settle: happy path ---
+    // --- settle: atomic swap ---
 
-    function test_Settle_PaysWinnerToSeller() public {
+    function test_Settle_SwapsLotForPaymentAtomically() public {
         uint256 id = createAuction(10 ether);
+        uint256 tokenId = lotTokenId(id);
         bidAndClose(id);
 
         vm.prank(bidder1);
@@ -204,21 +322,41 @@ contract SealedAuctionTest is Test {
         settleWith(closeResult(id, bidder1, 42 ether), TEE_PK);
 
         assertTrue(auctionState(id) == SealedAuction.AuctionState.Settled);
-        (,,,,,, address winner, uint256 price,) = auctionHouse.auctions(id);
+        (address winner, uint256 price) = auctionOutcome(id);
         assertEq(winner, bidder1);
         assertEq(price, 42 ether);
+
+        // Both legs landed in the same transaction.
         assertEq(token.balanceOf(seller), 42 ether);
         assertEq(token.balanceOf(bidder1), 1_000 ether - 42 ether);
+        assertEq(asset.ownerOf(tokenId), bidder1);
+        assertEq(asset.balanceOf(address(auctionHouse)), 0);
     }
 
-    function test_Settle_ZeroWinnerCancels() public {
+    function test_Settle_SwapsErc20Lot() public {
+        uint256 id = createErc20LotAuction(300 ether, 0);
+        bidAndClose(id);
+
+        vm.prank(bidder1);
+        token.approve(address(auctionHouse), 7 ether);
+        settleWith(closeResult(id, bidder1, 7 ether), TEE_PK);
+
+        assertEq(lotToken.balanceOf(bidder1), 300 ether);
+        assertEq(lotToken.balanceOf(address(auctionHouse)), 0);
+        assertEq(token.balanceOf(seller), 7 ether);
+    }
+
+    function test_Settle_ZeroWinnerCancelsAndReturnsLot() public {
         uint256 id = createAuction(10 ether);
+        uint256 tokenId = lotTokenId(id);
         bidAndClose(id);
 
         settleWith(closeResult(id, address(0), 0), TEE_PK);
 
         assertTrue(auctionState(id) == SealedAuction.AuctionState.Cancelled);
         assertEq(token.balanceOf(seller), 0);
+        // Reserve not met — the seller keeps the asset.
+        assertEq(asset.ownerOf(tokenId), seller);
     }
 
     // --- settle: reverts ---
@@ -305,8 +443,11 @@ contract SealedAuctionTest is Test {
         auctionHouse.settle(resultData, actionId, "submit", 1, sig);
     }
 
-    function test_Settle_RevertsWithoutAllowance() public {
+    /// The payment leg failing must roll the lot leg back too — the escrow is
+    /// intact and the auction can still be settled later.
+    function test_Settle_RevertsWithoutAllowanceAndKeepsLotEscrowed() public {
         uint256 id = createAuction(0);
+        uint256 tokenId = lotTokenId(id);
         bidAndClose(id);
 
         // Winner never approved — the v1 no-bid-bonds limitation surfaces here.
@@ -315,5 +456,15 @@ contract SealedAuctionTest is Test {
         bytes memory sig = signResult(resultData, actionId, "submit", 1, TEE_PK);
         vm.expectRevert("allowance");
         auctionHouse.settle(resultData, actionId, "submit", 1, sig);
+
+        assertEq(asset.ownerOf(tokenId), address(auctionHouse));
+        assertTrue(auctionState(id) == SealedAuction.AuctionState.Closing);
+
+        // Once the winner approves, the same result settles cleanly.
+        vm.prank(bidder1);
+        token.approve(address(auctionHouse), 5 ether);
+        auctionHouse.settle(resultData, actionId, "submit", 1, sig);
+        assertEq(asset.ownerOf(tokenId), bidder1);
+        assertEq(token.balanceOf(seller), 5 ether);
     }
 }

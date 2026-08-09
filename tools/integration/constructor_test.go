@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"extension-scaffold/tools/pkg/fccutils"
+	"sealed-auction/tools/pkg/fccutils"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"

@@ -10,9 +10,11 @@ import (
 const (
 	Version = "0.1.0"
 
-	OPTypeGreeting     = "GREETING"
-	OPCommandSayHello  = "SAY_HELLO"
-	OPCommandSayGoodbye = "SAY_GOODBYE"
+	// OPType and OPCommand strings — must match the bytes32 constants in
+	// contracts/InstructionSender.sol (contract SealedAuction).
+	OPTypeAuction         = "AUCTION"
+	OPCommandPlaceBid     = "PLACE_BID"
+	OPCommandCloseAuction = "CLOSE_AUCTION"
 
 	TimeoutShutdown = 5 * time.Second
 )

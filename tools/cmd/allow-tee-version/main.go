@@ -5,9 +5,9 @@ import (
 	"flag"
 	"os"
 	"strings"
-	"extension-scaffold/tools/pkg/configs"
-	"extension-scaffold/tools/pkg/fccutils"
-	"extension-scaffold/tools/pkg/support"
+	"sealed-auction/tools/pkg/configs"
+	"sealed-auction/tools/pkg/fccutils"
+	"sealed-auction/tools/pkg/support"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/flare-foundation/go-flare-common/pkg/logger"
 )

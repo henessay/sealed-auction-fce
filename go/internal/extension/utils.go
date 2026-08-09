@@ -2,7 +2,7 @@ package extension
 
 import (
 	"encoding/json"
-	"extension-scaffold/internal/config"
+	"sealed-auction/internal/config"
 	"fmt"
 	"net/http"
 

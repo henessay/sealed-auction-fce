@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
-	"extension-scaffold/tools/pkg/contracts/helloworld"
-	"extension-scaffold/tools/pkg/fccutils"
-	"extension-scaffold/tools/pkg/support"
+	"sealed-auction/tools/pkg/contracts/sealedauction"
+	"sealed-auction/tools/pkg/fccutils"
+	"sealed-auction/tools/pkg/support"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -91,7 +91,7 @@ func TestMain(m *testing.M) {
 // deployFreshInstructionSender deploys a new InstructionSender contract using
 // the registry addresses from testSupport. Returns the deployed address and
 // bound contract instance.
-func deployFreshInstructionSender(t *testing.T) (common.Address, *helloworld.HelloWorldInstructionSender) {
+func deployFreshInstructionSender(t *testing.T) (common.Address, *sealedauction.SealedAuction) {
 	t.Helper()
 	time.Sleep(rpcDelay)
 
@@ -100,7 +100,7 @@ func deployFreshInstructionSender(t *testing.T) (common.Address, *helloworld.Hel
 		t.Fatalf("failed to create transactor: %v", err)
 	}
 
-	address, tx, contract, err := helloworld.DeployHelloWorldInstructionSender(
+	address, tx, contract, err := sealedauction.DeploySealedAuction(
 		opts, testSupport.ChainClient,
 		testSupport.Addresses.FlareTeeManager,
 		testSupport.Addresses.FlareTeeManager,
@@ -135,7 +135,7 @@ func deployInstructionSenderRaw(t *testing.T, registryAddr, machineRegistryAddr 
 		t.Fatalf("failed to create transactor: %v", err)
 	}
 
-	_, _, _, err = helloworld.DeployHelloWorldInstructionSender(
+	_, _, _, err = sealedauction.DeploySealedAuction(
 		opts, testSupport.ChainClient,
 		registryAddr, machineRegistryAddr,
 	)

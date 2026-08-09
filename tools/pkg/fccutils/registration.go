@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
-	"extension-scaffold/tools/pkg/support"
+	"sealed-auction/tools/pkg/support"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"

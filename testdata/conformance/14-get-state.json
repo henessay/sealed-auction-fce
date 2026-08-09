@@ -1,0 +1,19 @@
+{
+  "description": "GET /state returns bytes32 stateVersion and aggregate counters only",
+  "expect": {
+    "json": {
+      "state": {
+        "auctionsClosed": 1,
+        "auctionsTracked": 0,
+        "bidsStored": 0
+      },
+      "stateVersion": "0x302e312e30000000000000000000000000000000000000000000000000000000"
+    },
+    "status": 200
+  },
+  "name": "14-get-state",
+  "request": {
+    "method": "GET",
+    "path": "/state"
+  }
+}

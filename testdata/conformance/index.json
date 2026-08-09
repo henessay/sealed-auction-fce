@@ -1,20 +1,18 @@
 {
   "fixtures": [
-    "01-say-hello-success",
-    "02-say-hello-counter-increments",
-    "03-say-hello-empty-name",
-    "04-say-hello-malformed-payload",
-    "05-say-goodbye-success",
-    "06-say-goodbye-empty-reason-allowed",
-    "07-say-goodbye-rejects-json",
-    "08-unknown-op-type",
-    "09-unknown-op-command",
-    "10-invalid-action-json",
-    "11-invalid-hex-in-message",
-    "12-message-not-datafixed",
-    "13-get-action-not-allowed",
-    "14-post-state-not-allowed",
-    "15-unknown-path",
-    "16-get-state"
+    "01-close-auction-no-bids",
+    "02-close-auction-idempotent",
+    "03-place-bid-empty-ciphertext",
+    "04-place-bid-malformed-abi",
+    "05-place-bid-after-close",
+    "06-unknown-op-type",
+    "07-unknown-op-command",
+    "08-invalid-action-json",
+    "09-invalid-hex-in-message",
+    "10-message-not-datafixed",
+    "11-get-action-not-allowed",
+    "12-post-state-not-allowed",
+    "13-unknown-path",
+    "14-get-state"
   ]
 }

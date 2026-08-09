@@ -1,4 +1,4 @@
-module extension-scaffold/tools
+module sealed-auction/tools
 
 go 1.25.1
 

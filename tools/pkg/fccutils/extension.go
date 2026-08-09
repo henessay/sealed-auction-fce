@@ -3,7 +3,7 @@ package fccutils
 import (
 	"context"
 	"math/big"
-	"extension-scaffold/tools/pkg/support"
+	"sealed-auction/tools/pkg/support"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"

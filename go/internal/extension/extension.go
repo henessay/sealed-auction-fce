@@ -1,14 +1,13 @@
 package extension
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
 
-	"extension-scaffold/internal/config"
-	"extension-scaffold/pkg/types"
+	"sealed-auction/internal/config"
+	"sealed-auction/pkg/types"
 
 	"github.com/flare-foundation/go-flare-common/pkg/tee/instruction"
 	"github.com/flare-foundation/go-flare-common/pkg/tee/structs"
@@ -18,19 +17,29 @@ import (
 	"github.com/flare-foundation/tee-node/pkg/processorutils"
 )
 
+// Extension holds sealed bids in process memory, keyed by auction id.
+// Bids are volatile by design (v1): a restart between placeBid and closeAuction
+// loses them and the auction settles as cancelled. See ARCHITECTURE.md.
 type Extension struct {
-	mu     sync.RWMutex
 	Server *http.Server
 
-	greetingCount int
-	lastGreeting  string
-	farewellCount int
-	lastFarewell  string
+	// decrypt forwards ECIES ciphertext to tee-node /decrypt.
+	// Injectable for unit tests; defaults to the local node call.
+	decrypt func(ciphertext []byte) ([]byte, error)
+
+	mu     sync.RWMutex
+	bids   map[string][]Bid // auctionId (decimal string) → bids in arrival order
+	closed map[string]bool  // auctions already closed in this process
+	seq    uint64
 }
 
 // --- DO NOT MODIFY: New(), actionHandler() are boilerplate.
 func New(extensionPort, signPort int) *Extension {
-	e := &Extension{}
+	e := &Extension{
+		decrypt: func(ct []byte) ([]byte, error) { return decryptViaNode(signPort, ct) },
+		bids:    make(map[string][]Bid),
+		closed:  make(map[string]bool),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", e.stateHandler)
@@ -40,16 +49,19 @@ func New(extensionPort, signPort int) *Extension {
 	return e
 }
 
-// stateHandler() structure is boilerplate but update the State field mapping to match your Extension fields.
+// stateHandler reports aggregate counters only — never bid amounts.
 func (e *Extension) stateHandler(w http.ResponseWriter, r *http.Request) {
 	e.mu.RLock()
+	bidsStored := 0
+	for _, bs := range e.bids {
+		bidsStored += len(bs)
+	}
 	stateResponse := types.StateResponse{
 		StateVersion: teeutils.ToHash(config.Version),
 		State: types.State{
-			GreetingCount: e.greetingCount,
-			LastGreeting:  e.lastGreeting,
-			FarewellCount: e.farewellCount,
-			LastFarewell:  e.lastFarewell,
+			AuctionsTracked: len(e.bids),
+			AuctionsClosed:  len(e.closed),
+			BidsStored:      bidsStored,
 		},
 	}
 	e.mu.RUnlock()
@@ -68,27 +80,27 @@ func (e *Extension) processAction(action teetypes.Action) (int, []byte) {
 	}
 
 	switch {
-	case dataFixed.OPType == teeutils.ToHash(config.OPTypeGreeting):
-		return e.processGreeting(action, dataFixed)
+	case dataFixed.OPType == teeutils.ToHash(config.OPTypeAuction):
+		return e.processAuction(action, dataFixed)
 
 	default:
 		return http.StatusNotImplemented, []byte(fmt.Sprintf(
 			"unsupported op type: received %s, expected %s (%s)",
-			dataFixed.OPType.Hex(), teeutils.ToHash(config.OPTypeGreeting).Hex(), config.OPTypeGreeting,
+			dataFixed.OPType.Hex(), teeutils.ToHash(config.OPTypeAuction).Hex(), config.OPTypeAuction,
 		))
 	}
 }
 
-// processGreeting routes GREETING instructions by OPCommand.
-func (e *Extension) processGreeting(action teetypes.Action, df *instruction.DataFixed) (int, []byte) {
+// processAuction routes AUCTION instructions by OPCommand.
+func (e *Extension) processAuction(action teetypes.Action, df *instruction.DataFixed) (int, []byte) {
 	switch {
-	case df.OPCommand == teeutils.ToHash(config.OPCommandSayHello):
-		ar := e.processSayHello(action, df)
+	case df.OPCommand == teeutils.ToHash(config.OPCommandPlaceBid):
+		ar := e.processPlaceBid(action, df)
 		b, _ := json.Marshal(ar)
 		return http.StatusOK, b
 
-	case df.OPCommand == teeutils.ToHash(config.OPCommandSayGoodbye):
-		ar := e.processSayGoodbye(action, df)
+	case df.OPCommand == teeutils.ToHash(config.OPCommandCloseAuction):
+		ar := e.processCloseAuction(action, df)
 		b, _ := json.Marshal(ar)
 		return http.StatusOK, b
 
@@ -96,66 +108,115 @@ func (e *Extension) processGreeting(action teetypes.Action, df *instruction.Data
 		return http.StatusNotImplemented, []byte(fmt.Sprintf(
 			"unsupported op command: received %s, expected one of [%s (%s), %s (%s)]",
 			df.OPCommand.Hex(),
-			teeutils.ToHash(config.OPCommandSayHello).Hex(), config.OPCommandSayHello,
-			teeutils.ToHash(config.OPCommandSayGoodbye).Hex(), config.OPCommandSayGoodbye,
+			teeutils.ToHash(config.OPCommandPlaceBid).Hex(), config.OPCommandPlaceBid,
+			teeutils.ToHash(config.OPCommandCloseAuction).Hex(), config.OPCommandCloseAuction,
 		))
 	}
 }
 
-// processSayHello handles SAY_HELLO instructions: returns a greeting and tracks count.
-func (e *Extension) processSayHello(action teetypes.Action, df *instruction.DataFixed) teetypes.ActionResult {
-	var req types.SayHelloRequest
-	dec := json.NewDecoder(bytes.NewReader(df.OriginalMessage))
-	dec.DisallowUnknownFields()
-	err := dec.Decode(&req)
-	if err != nil {
-		return buildResult(action, df, nil, 0, fmt.Errorf("decoding request: %w", err))
+// processPlaceBid decodes the chain-authenticated wrapper, decrypts the ECIES
+// ciphertext via tee-node, cross-checks wrapper vs payload, and stores the bid.
+func (e *Extension) processPlaceBid(action teetypes.Action, df *instruction.DataFixed) teetypes.ActionResult {
+	if len(df.OriginalMessage) == 0 {
+		return buildResult(action, df, nil, 0, fmt.Errorf("originalMessage is empty"))
 	}
 
-	if req.Name == "" {
-		return buildResult(action, df, nil, 0, fmt.Errorf("name must not be empty"))
+	wrapper, err := structs.Decode[types.PlaceBidMessage](types.PlaceBidMessageArg, df.OriginalMessage)
+	if err != nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("decoding place-bid message: %v", err))
+	}
+	if wrapper.AuctionId == nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("auctionId missing"))
+	}
+	if len(wrapper.Ciphertext) == 0 {
+		return buildResult(action, df, nil, 0, fmt.Errorf("ciphertext must not be empty"))
+	}
+
+	// Cheap checks before touching the node: a bid for an already-closed
+	// auction is rejected without decryption.
+	key := wrapper.AuctionId.String()
+	e.mu.RLock()
+	isClosed := e.closed[key]
+	e.mu.RUnlock()
+	if isClosed {
+		return buildResult(action, df, nil, 0, fmt.Errorf("auction %s already closed", key))
+	}
+
+	plaintext, err := e.decrypt(wrapper.Ciphertext)
+	if err != nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("decryption failed: %v", err))
+	}
+
+	payload, err := structs.Decode[types.BidPayload](types.BidPayloadArg, plaintext)
+	if err != nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("decoding bid payload: %v", err))
+	}
+
+	// The wrapper is built on-chain from msg.sender — it is the trusted source.
+	// A payload that disagrees is either a spoof attempt or a replayed
+	// ciphertext from another bidder; both are rejected.
+	if payload.Bidder != wrapper.Bidder {
+		return buildResult(action, df, nil, 0, fmt.Errorf("payload bidder does not match on-chain sender"))
+	}
+	if payload.AuctionId == nil || payload.AuctionId.Cmp(wrapper.AuctionId) != 0 {
+		return buildResult(action, df, nil, 0, fmt.Errorf("payload auctionId does not match instruction"))
+	}
+	if payload.AmountWei == nil || payload.AmountWei.Sign() <= 0 {
+		return buildResult(action, df, nil, 0, fmt.Errorf("bid amount must be positive"))
 	}
 
 	e.mu.Lock()
-	e.greetingCount++
-	greetingNumber := e.greetingCount
-	greeting := fmt.Sprintf("Hello, %s! Welcome to Flare Confidential Compute.", req.Name)
-	e.lastGreeting = greeting
+	e.seq++
+	e.bids[key] = append(e.bids[key], Bid{
+		Bidder:       payload.Bidder,
+		ContractAddr: payload.ContractAddr,
+		Amount:       payload.AmountWei,
+		Timestamp:    df.Timestamp,
+		Seq:          e.seq,
+	})
 	e.mu.Unlock()
 
-	resp := types.SayHelloResponse{
-		Greeting:       greeting,
-		GreetingNumber: greetingNumber,
-	}
-	data, _ := json.Marshal(resp)
-
+	// ActionResult.Data is public — acknowledge, reveal nothing.
+	data, _ := json.Marshal(types.PlaceBidResponse{Accepted: true})
 	return buildResult(action, df, data, 1, nil)
 }
 
-// processSayGoodbye handles SAY_GOODBYE instructions: returns a farewell and tracks count.
-func (e *Extension) processSayGoodbye(action teetypes.Action, df *instruction.DataFixed) teetypes.ActionResult {
-	var req types.SayGoodbyeRequest
-	err := structs.DecodeTo(types.SayGoodbyeMessageArg, df.OriginalMessage, &req)
-	if err != nil {
-		return buildResult(action, df, nil, 0, fmt.Errorf("decoding request: %w", err))
+// processCloseAuction selects the winner and returns the ABI-encoded result
+// that SealedAuction.settle() verifies on-chain. Idempotent: bids are retained,
+// so re-issuing CLOSE_AUCTION (the recovery path) reproduces the same result.
+func (e *Extension) processCloseAuction(action teetypes.Action, df *instruction.DataFixed) teetypes.ActionResult {
+	if len(df.OriginalMessage) == 0 {
+		return buildResult(action, df, nil, 0, fmt.Errorf("originalMessage is empty"))
 	}
 
-	if req.Name == "" {
-		return buildResult(action, df, nil, 0, fmt.Errorf("name must not be empty"))
+	req, err := structs.Decode[types.CloseMessage](types.CloseMessageArg, df.OriginalMessage)
+	if err != nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("decoding close message: %v", err))
 	}
+	if req.AuctionId == nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("auctionId missing"))
+	}
+
+	key := req.AuctionId.String()
 
 	e.mu.Lock()
-	e.farewellCount++
-	farewellNumber := e.farewellCount
-	farewell := fmt.Sprintf("Goodbye, %s! Reason: %s", req.Name, req.Reason)
-	e.lastFarewell = farewell
+	e.closed[key] = true
+	snapshot := make([]Bid, len(e.bids[key]))
+	copy(snapshot, e.bids[key])
 	e.mu.Unlock()
 
-	resp := types.SayGoodbyeResponse{
-		Farewell:       farewell,
-		FarewellNumber: farewellNumber,
-	}
-	data, _ := json.Marshal(resp)
+	// winner = address(0) when nothing qualifies → the contract cancels.
+	winner, clearingPrice, _ := pickWinner(snapshot, req.ContractAddr, req.ReservePrice)
 
-	return buildResult(action, df, data, 1, nil)
+	encoded, err := types.AuctionResultArgs.Pack(
+		req.ContractAddr,
+		req.AuctionId,
+		winner,
+		clearingPrice,
+	)
+	if err != nil {
+		return buildResult(action, df, nil, 0, fmt.Errorf("ABI encode auction result: %v", err))
+	}
+
+	return buildResult(action, df, encoded, 1, nil)
 }

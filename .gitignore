@@ -60,4 +60,4 @@ notes/
 DEPLOYMENT.md
 
 config/**/*.log
-config/register-tee.state
+config/register-tee.state.env.demo-seller.json

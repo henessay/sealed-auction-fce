@@ -1,4 +1,4 @@
-module extension-scaffold
+module sealed-auction
 
 go 1.25.1
 

@@ -2,12 +2,14 @@ package extension
 
 import (
 	"encoding/json"
+	"fmt"
+	"math/big"
 	"net/http"
 	"strings"
 	"testing"
 
-	"extension-scaffold/internal/config"
-	"extension-scaffold/pkg/types"
+	"sealed-auction/internal/config"
+	"sealed-auction/pkg/types"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -16,13 +18,28 @@ import (
 	teeutils "github.com/flare-foundation/tee-node/pkg/utils"
 )
 
-// toHash mirrors teeutils.ToHash for clarity: left-pads a string into a 32-byte hash.
+var (
+	contractA = common.HexToAddress("0x00000000000000000000000000000000000000AA")
+	alice     = common.HexToAddress("0x0000000000000000000000000000000000000A11")
+	bob       = common.HexToAddress("0x0000000000000000000000000000000000000B0B")
+	carol     = common.HexToAddress("0x0000000000000000000000000000000000000CA0")
+)
+
 func toHash(s string) common.Hash { return teeutils.ToHash(s) }
 
+// newTestExtension returns an Extension whose decrypt is the identity function:
+// tests pass ABI-encoded BidPayload bytes directly as "ciphertext".
+func newTestExtension() *Extension {
+	return &Extension{
+		decrypt: func(ct []byte) ([]byte, error) { return ct, nil },
+		bids:    make(map[string][]Bid),
+		closed:  make(map[string]bool),
+	}
+}
+
 // buildTestAction constructs a teetypes.Action whose Data.Message is the
-// JSON-encoded DataFixed payload. This is what processAction expects to parse.
-func buildTestAction(opType, opCommand common.Hash, originalMessage []byte) teetypes.Action {
-	// DataFixed is the structure that processorutils.Parse extracts from Data.Message.
+// JSON-encoded DataFixed payload, as tee-node sends it.
+func buildTestAction(opType, opCommand common.Hash, originalMessage []byte, timestamp uint64) teetypes.Action {
 	type dataFixed struct {
 		InstructionID      common.Hash    `json:"instructionId"`
 		TeeID              common.Address `json:"teeId"`
@@ -36,6 +53,7 @@ func buildTestAction(opType, opCommand common.Hash, originalMessage []byte) teet
 	}
 
 	df := dataFixed{
+		Timestamp:       timestamp,
 		OPType:          opType,
 		OPCommand:       opCommand,
 		OriginalMessage: originalMessage,
@@ -51,345 +69,315 @@ func buildTestAction(opType, opCommand common.Hash, originalMessage []byte) teet
 	}
 }
 
-// abiEncodeSayGoodbye produces the ABI-encoded tuple (string name, string reason)
-// matching the Solidity SayGoodbyeMessage struct.
-func abiEncodeSayGoodbye(name, reason string) []byte {
-	args := abi.Arguments{types.SayGoodbyeMessageArg}
-	type goodbye struct {
-		Name   string
-		Reason string
+func encodePlaceBidMessage(t *testing.T, auctionId *big.Int, bidder common.Address, ciphertext []byte) []byte {
+	t.Helper()
+	args := abi.Arguments{types.PlaceBidMessageArg}
+	encoded, err := args.Pack(struct {
+		AuctionId  *big.Int
+		Bidder     common.Address
+		Ciphertext []byte
+	}{auctionId, bidder, ciphertext})
+	if err != nil {
+		t.Fatalf("encode PlaceBidMessage: %v", err)
 	}
-	encoded, _ := args.Pack(goodbye{Name: name, Reason: reason})
 	return encoded
 }
 
-// --- 4.1: OPType/OPCommand Hash Debug Info ---
+func encodeBidPayload(t *testing.T, auctionId *big.Int, contractAddr, bidder common.Address, amount *big.Int) []byte {
+	t.Helper()
+	args := abi.Arguments{types.BidPayloadArg}
+	encoded, err := args.Pack(struct {
+		AuctionId    *big.Int
+		ContractAddr common.Address
+		Bidder       common.Address
+		AmountWei    *big.Int
+		Salt         [32]byte
+	}{auctionId, contractAddr, bidder, amount, [32]byte{0x42}})
+	if err != nil {
+		t.Fatalf("encode BidPayload: %v", err)
+	}
+	return encoded
+}
+
+func encodeCloseMessage(t *testing.T, auctionId *big.Int, contractAddr common.Address, reserve *big.Int, deadline uint64) []byte {
+	t.Helper()
+	args := abi.Arguments{types.CloseMessageArg}
+	encoded, err := args.Pack(struct {
+		AuctionId    *big.Int
+		ContractAddr common.Address
+		ReservePrice *big.Int
+		Deadline     uint64
+	}{auctionId, contractAddr, reserve, deadline})
+	if err != nil {
+		t.Fatalf("encode CloseMessage: %v", err)
+	}
+	return encoded
+}
+
+// placeBid drives a full PLACE_BID action through processAction and returns the ActionResult.
+func placeBid(t *testing.T, e *Extension, auctionId int64, bidder common.Address, payload []byte, timestamp uint64) teetypes.ActionResult {
+	t.Helper()
+	msg := encodePlaceBidMessage(t, big.NewInt(auctionId), bidder, payload)
+	action := buildTestAction(toHash(config.OPTypeAuction), toHash(config.OPCommandPlaceBid), msg, timestamp)
+	status, body := e.processAction(action)
+	if status != http.StatusOK {
+		t.Fatalf("PLACE_BID: expected HTTP 200, got %d: %s", status, body)
+	}
+	var ar teetypes.ActionResult
+	if err := json.Unmarshal(body, &ar); err != nil {
+		t.Fatalf("unmarshal ActionResult: %v", err)
+	}
+	return ar
+}
+
+// closeAuction drives a CLOSE_AUCTION action and returns the decoded result.
+func closeAuction(t *testing.T, e *Extension, auctionId int64, reserve *big.Int) types.AuctionResult {
+	t.Helper()
+	msg := encodeCloseMessage(t, big.NewInt(auctionId), contractA, reserve, 1700000000)
+	action := buildTestAction(toHash(config.OPTypeAuction), toHash(config.OPCommandCloseAuction), msg, 1700000100)
+	status, body := e.processAction(action)
+	if status != http.StatusOK {
+		t.Fatalf("CLOSE_AUCTION: expected HTTP 200, got %d: %s", status, body)
+	}
+	var ar teetypes.ActionResult
+	if err := json.Unmarshal(body, &ar); err != nil {
+		t.Fatalf("unmarshal ActionResult: %v", err)
+	}
+	if ar.Status != 1 {
+		t.Fatalf("CLOSE_AUCTION: expected status 1, got %d (%s)", ar.Status, ar.Log)
+	}
+	vals, err := types.AuctionResultArgs.Unpack(ar.Data)
+	if err != nil {
+		t.Fatalf("unpack AuctionResult: %v", err)
+	}
+	return types.AuctionResult{
+		ContractAddr:  vals[0].(common.Address),
+		AuctionId:     vals[1].(*big.Int),
+		Winner:        vals[2].(common.Address),
+		ClearingPrice: vals[3].(*big.Int),
+	}
+}
+
+// --- pickWinner: table-driven ---
+
+func TestPickWinner(t *testing.T) {
+	wei := func(n int64) *big.Int { return big.NewInt(n) }
+	bid := func(bidder common.Address, amount int64, ts, seq uint64) Bid {
+		return Bid{Bidder: bidder, ContractAddr: contractA, Amount: wei(amount), Timestamp: ts, Seq: seq}
+	}
+
+	cases := []struct {
+		name       string
+		bids       []Bid
+		reserve    *big.Int
+		wantWinner common.Address
+		wantPrice  int64
+		wantOK     bool
+	}{
+		{name: "empty set", bids: nil, reserve: wei(0), wantWinner: common.Address{}, wantPrice: 0, wantOK: false},
+		{name: "single bid no reserve", bids: []Bid{bid(alice, 100, 1, 1)}, reserve: wei(0),
+			wantWinner: alice, wantPrice: 100, wantOK: true},
+		{name: "highest wins", bids: []Bid{bid(alice, 100, 1, 1), bid(bob, 300, 2, 2), bid(carol, 200, 3, 3)},
+			reserve: wei(0), wantWinner: bob, wantPrice: 300, wantOK: true},
+		{name: "all below reserve", bids: []Bid{bid(alice, 100, 1, 1), bid(bob, 150, 2, 2)}, reserve: wei(200),
+			wantWinner: common.Address{}, wantPrice: 0, wantOK: false},
+		{name: "reserve exactly met", bids: []Bid{bid(alice, 200, 1, 1)}, reserve: wei(200),
+			wantWinner: alice, wantPrice: 200, wantOK: true},
+		{name: "reserve filters the highest bidder out never happens (highest >= others), lower filtered",
+			bids: []Bid{bid(alice, 100, 1, 1), bid(bob, 250, 2, 2)}, reserve: wei(200),
+			wantWinner: bob, wantPrice: 250, wantOK: true},
+		{name: "tie on amount earlier timestamp wins", bids: []Bid{bid(alice, 300, 20, 1), bid(bob, 300, 10, 2)},
+			reserve: wei(0), wantWinner: bob, wantPrice: 300, wantOK: true},
+		{name: "tie on amount and timestamp lower seq wins", bids: []Bid{bid(alice, 300, 10, 5), bid(bob, 300, 10, 4)},
+			reserve: wei(0), wantWinner: bob, wantPrice: 300, wantOK: true},
+		{name: "nil reserve treated as zero", bids: []Bid{bid(alice, 1, 1, 1)}, reserve: nil,
+			wantWinner: alice, wantPrice: 1, wantOK: true},
+		{name: "other contract bids excluded",
+			bids: []Bid{{Bidder: alice, ContractAddr: common.HexToAddress("0xdead"), Amount: wei(999), Timestamp: 1, Seq: 1},
+				bid(bob, 100, 2, 2)},
+			reserve: wei(0), wantWinner: bob, wantPrice: 100, wantOK: true},
+		{name: "zero amount excluded", bids: []Bid{{Bidder: alice, ContractAddr: contractA, Amount: wei(0), Timestamp: 1, Seq: 1}},
+			reserve: wei(0), wantWinner: common.Address{}, wantPrice: 0, wantOK: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			winner, price, ok := pickWinner(tc.bids, contractA, tc.reserve)
+			if ok != tc.wantOK {
+				t.Fatalf("ok: want %v, got %v", tc.wantOK, ok)
+			}
+			if winner != tc.wantWinner {
+				t.Errorf("winner: want %s, got %s", tc.wantWinner.Hex(), winner.Hex())
+			}
+			if price.Cmp(big.NewInt(tc.wantPrice)) != 0 {
+				t.Errorf("price: want %d, got %s", tc.wantPrice, price)
+			}
+		})
+	}
+}
+
+// --- PLACE_BID handler ---
+
+func TestPlaceBid_Success(t *testing.T) {
+	e := newTestExtension()
+	payload := encodeBidPayload(t, big.NewInt(7), contractA, alice, big.NewInt(500))
+	ar := placeBid(t, e, 7, alice, payload, 100)
+
+	if ar.Status != 1 {
+		t.Fatalf("expected status 1, got %d (%s)", ar.Status, ar.Log)
+	}
+	var resp types.PlaceBidResponse
+	if err := json.Unmarshal(ar.Data, &resp); err != nil || !resp.Accepted {
+		t.Fatalf("expected {accepted:true}, got %s (err %v)", ar.Data, err)
+	}
+	if got := string(ar.Data); strings.Contains(got, "500") {
+		t.Errorf("PLACE_BID result must not leak the amount, got %s", got)
+	}
+	if len(e.bids["7"]) != 1 {
+		t.Fatalf("expected 1 stored bid, got %d", len(e.bids["7"]))
+	}
+}
+
+func TestPlaceBid_Rejections(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload func(t *testing.T) []byte
+		wantLog string
+	}{
+		{"bidder mismatch (spoof or ciphertext replay)",
+			func(t *testing.T) []byte { return encodeBidPayload(t, big.NewInt(7), contractA, bob, big.NewInt(500)) },
+			"payload bidder does not match on-chain sender"},
+		{"auctionId mismatch",
+			func(t *testing.T) []byte { return encodeBidPayload(t, big.NewInt(8), contractA, alice, big.NewInt(500)) },
+			"payload auctionId does not match instruction"},
+		{"zero amount",
+			func(t *testing.T) []byte { return encodeBidPayload(t, big.NewInt(7), contractA, alice, big.NewInt(0)) },
+			"bid amount must be positive"},
+		{"garbage plaintext",
+			func(t *testing.T) []byte { return []byte("not abi") },
+			"decoding bid payload"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestExtension()
+			ar := placeBid(t, e, 7, alice, tc.payload(t), 100)
+			if ar.Status != 0 {
+				t.Fatalf("expected status 0, got %d (%s)", ar.Status, ar.Log)
+			}
+			if !strings.Contains(ar.Log, tc.wantLog) {
+				t.Errorf("log: want substring %q, got %q", tc.wantLog, ar.Log)
+			}
+			if len(e.bids["7"]) != 0 {
+				t.Errorf("rejected bid must not be stored")
+			}
+		})
+	}
+}
+
+func TestPlaceBid_DecryptFailure(t *testing.T) {
+	e := newTestExtension()
+	e.decrypt = func([]byte) ([]byte, error) { return nil, fmt.Errorf("boom") }
+	payload := encodeBidPayload(t, big.NewInt(7), contractA, alice, big.NewInt(500))
+	ar := placeBid(t, e, 7, alice, payload, 100)
+	if ar.Status != 0 || !strings.Contains(ar.Log, "decryption failed") {
+		t.Fatalf("expected decryption failure, got status %d log %q", ar.Status, ar.Log)
+	}
+}
+
+func TestPlaceBid_AfterCloseRejected(t *testing.T) {
+	e := newTestExtension()
+	closeAuction(t, e, 7, big.NewInt(0))
+
+	payload := encodeBidPayload(t, big.NewInt(7), contractA, alice, big.NewInt(500))
+	ar := placeBid(t, e, 7, alice, payload, 100)
+	if ar.Status != 0 || !strings.Contains(ar.Log, "already closed") {
+		t.Fatalf("expected 'already closed' rejection, got status %d log %q", ar.Status, ar.Log)
+	}
+}
+
+// --- CLOSE_AUCTION handler ---
+
+func TestCloseAuction_EndToEnd(t *testing.T) {
+	e := newTestExtension()
+	placeBid(t, e, 7, alice, encodeBidPayload(t, big.NewInt(7), contractA, alice, big.NewInt(100)), 10)
+	placeBid(t, e, 7, bob, encodeBidPayload(t, big.NewInt(7), contractA, bob, big.NewInt(300)), 20)
+	placeBid(t, e, 7, carol, encodeBidPayload(t, big.NewInt(7), contractA, carol, big.NewInt(200)), 30)
+
+	res := closeAuction(t, e, 7, big.NewInt(150))
+	if res.Winner != bob {
+		t.Errorf("winner: want %s, got %s", bob.Hex(), res.Winner.Hex())
+	}
+	if res.ClearingPrice.Cmp(big.NewInt(300)) != 0 {
+		t.Errorf("clearingPrice: want 300, got %s", res.ClearingPrice)
+	}
+	if res.ContractAddr != contractA || res.AuctionId.Cmp(big.NewInt(7)) != 0 {
+		t.Errorf("result binding wrong: %s %s", res.ContractAddr.Hex(), res.AuctionId)
+	}
+}
+
+func TestCloseAuction_NoBidsMeansZeroWinner(t *testing.T) {
+	e := newTestExtension()
+	res := closeAuction(t, e, 9, big.NewInt(0))
+	if res.Winner != (common.Address{}) || res.ClearingPrice.Sign() != 0 {
+		t.Fatalf("expected zero winner and price, got %s / %s", res.Winner.Hex(), res.ClearingPrice)
+	}
+}
+
+func TestCloseAuction_IdempotentReclose(t *testing.T) {
+	e := newTestExtension()
+	placeBid(t, e, 7, alice, encodeBidPayload(t, big.NewInt(7), contractA, alice, big.NewInt(100)), 10)
+
+	first := closeAuction(t, e, 7, big.NewInt(0))
+	second := closeAuction(t, e, 7, big.NewInt(0))
+	if first.Winner != second.Winner || first.ClearingPrice.Cmp(second.ClearingPrice) != 0 {
+		t.Fatalf("re-close must reproduce the same result: %s/%s vs %s/%s",
+			first.Winner.Hex(), first.ClearingPrice, second.Winner.Hex(), second.ClearingPrice)
+	}
+}
+
+// --- Router ---
 
 func TestProcessAction_UnknownOPType(t *testing.T) {
-	e := &Extension{}
-	action := buildTestAction(
-		toHash("UNKNOWN_TYPE"),
-		toHash(config.OPCommandSayHello),
-		nil,
-	)
+	e := newTestExtension()
+	action := buildTestAction(toHash("UNKNOWN_TYPE"), toHash(config.OPCommandPlaceBid), nil, 0)
 
 	status, body := e.processAction(action)
-
 	if status != http.StatusNotImplemented {
-		t.Fatalf("expected status %d, got %d", http.StatusNotImplemented, status)
+		t.Fatalf("expected 501, got %d", status)
 	}
-
 	bodyStr := string(body)
-	t.Logf("501 body: %s", bodyStr)
-
-	// Should contain "unsupported op type"
-	if !contains(bodyStr, "unsupported op type") {
+	if !strings.Contains(bodyStr, "unsupported op type") {
 		t.Error("expected body to contain 'unsupported op type'")
 	}
-
-	// Should include the received hash
-	receivedHash := toHash("UNKNOWN_TYPE").Hex()
-	if !contains(bodyStr, receivedHash) {
-		t.Errorf("expected body to contain received hash %s", receivedHash)
-	}
-
-	// Should include the expected hash
-	expectedHash := toHash(config.OPTypeGreeting).Hex()
-	if !contains(bodyStr, expectedHash) {
-		t.Errorf("expected body to contain expected hash %s", expectedHash)
-	}
-
-	// Should include the human-readable name
-	if !contains(bodyStr, config.OPTypeGreeting) {
-		t.Errorf("expected body to contain %q", config.OPTypeGreeting)
+	for _, want := range []string{toHash("UNKNOWN_TYPE").Hex(), toHash(config.OPTypeAuction).Hex(), config.OPTypeAuction} {
+		if !strings.Contains(bodyStr, want) {
+			t.Errorf("expected body to contain %q", want)
+		}
 	}
 }
 
 func TestProcessAction_UnknownOPCommand(t *testing.T) {
-	e := &Extension{}
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash("UNKNOWN_COMMAND"),
-		nil,
-	)
+	e := newTestExtension()
+	action := buildTestAction(toHash(config.OPTypeAuction), toHash("NOT_A_COMMAND"), nil, 0)
 
 	status, body := e.processAction(action)
-
 	if status != http.StatusNotImplemented {
-		t.Fatalf("expected status %d, got %d", http.StatusNotImplemented, status)
+		t.Fatalf("expected 501, got %d", status)
 	}
-
 	bodyStr := string(body)
-	t.Logf("501 body: %s", bodyStr)
-
-	// Should contain "unsupported op command"
-	if !contains(bodyStr, "unsupported op command") {
+	if !strings.Contains(bodyStr, "unsupported op command") {
 		t.Error("expected body to contain 'unsupported op command'")
 	}
-
-	// Should include the received hash
-	receivedHash := toHash("UNKNOWN_COMMAND").Hex()
-	if !contains(bodyStr, receivedHash) {
-		t.Errorf("expected body to contain received hash %s", receivedHash)
-	}
-
-	// Should include both expected command hashes and names
-	for _, cmd := range []string{config.OPCommandSayHello, config.OPCommandSayGoodbye} {
-		cmdHash := toHash(cmd).Hex()
-		if !contains(bodyStr, cmdHash) {
-			t.Errorf("expected body to contain hash for %s: %s", cmd, cmdHash)
-		}
-		if !contains(bodyStr, cmd) {
-			t.Errorf("expected body to contain command name %q", cmd)
-		}
-	}
-}
-
-// --- Valid Actions ---
-
-func TestProcessAction_ValidSayHello(t *testing.T) {
-	e := &Extension{}
-
-	payload, _ := json.Marshal(types.SayHelloRequest{Name: "Alice"})
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash(config.OPCommandSayHello),
-		payload,
-	)
-
-	status, body := e.processAction(action)
-
-	if status != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, status, body)
-	}
-
-	var result teetypes.ActionResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("failed to unmarshal ActionResult: %v", err)
-	}
-
-	if result.Status != 1 {
-		t.Fatalf("expected ActionResult.Status=1 (success), got %d: %s", result.Status, result.Log)
-	}
-
-	var resp types.SayHelloResponse
-	if err := json.Unmarshal(result.Data, &resp); err != nil {
-		t.Fatalf("failed to unmarshal SayHelloResponse: %v", err)
-	}
-
-	if resp.Greeting == "" {
-		t.Error("expected non-empty greeting")
-	}
-	if resp.GreetingNumber != 1 {
-		t.Errorf("expected GreetingNumber=1, got %d", resp.GreetingNumber)
-	}
-	if !contains(resp.Greeting, "Alice") {
-		t.Errorf("expected greeting to contain 'Alice', got %q", resp.Greeting)
-	}
-	t.Logf("Response: %+v", resp)
-}
-
-func TestProcessAction_ValidSayGoodbye(t *testing.T) {
-	e := &Extension{}
-
-	payload := abiEncodeSayGoodbye("Bob", "leaving town")
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash(config.OPCommandSayGoodbye),
-		payload,
-	)
-
-	status, body := e.processAction(action)
-
-	if status != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, status, body)
-	}
-
-	var result teetypes.ActionResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("failed to unmarshal ActionResult: %v", err)
-	}
-
-	if result.Status != 1 {
-		t.Fatalf("expected ActionResult.Status=1 (success), got %d: %s", result.Status, result.Log)
-	}
-
-	var resp types.SayGoodbyeResponse
-	if err := json.Unmarshal(result.Data, &resp); err != nil {
-		t.Fatalf("failed to unmarshal SayGoodbyeResponse: %v", err)
-	}
-
-	if resp.Farewell == "" {
-		t.Error("expected non-empty farewell")
-	}
-	if resp.FarewellNumber != 1 {
-		t.Errorf("expected FarewellNumber=1, got %d", resp.FarewellNumber)
-	}
-	if !contains(resp.Farewell, "Bob") {
-		t.Errorf("expected farewell to contain 'Bob', got %q", resp.Farewell)
-	}
-	if !contains(resp.Farewell, "leaving town") {
-		t.Errorf("expected farewell to contain 'leaving town', got %q", resp.Farewell)
-	}
-	t.Logf("Response: %+v", resp)
-}
-
-// --- Error Cases ---
-
-func TestProcessSayHello_EmptyName(t *testing.T) {
-	e := &Extension{}
-
-	payload, _ := json.Marshal(types.SayHelloRequest{Name: ""})
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash(config.OPCommandSayHello),
-		payload,
-	)
-
-	status, body := e.processAction(action)
-
-	if status != http.StatusOK {
-		t.Fatalf("expected status %d (error is in ActionResult, not HTTP), got %d", http.StatusOK, status)
-	}
-
-	var result teetypes.ActionResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
-	}
-
-	if result.Status != 0 {
-		t.Fatalf("expected ActionResult.Status=0 (error), got %d", result.Status)
-	}
-
-	if !contains(result.Log, "name must not be empty") {
-		t.Errorf("expected log to contain 'name must not be empty', got %q", result.Log)
-	}
-	t.Logf("Error log: %s", result.Log)
-}
-
-func TestProcessSayHello_InvalidJSON(t *testing.T) {
-	e := &Extension{}
-
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash(config.OPCommandSayHello),
-		[]byte(`{invalid json`),
-	)
-
-	status, body := e.processAction(action)
-
-	if status != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, status)
-	}
-
-	var result teetypes.ActionResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
-	}
-
-	if result.Status != 0 {
-		t.Fatalf("expected ActionResult.Status=0 (error), got %d", result.Status)
-	}
-
-	if !contains(result.Log, "decoding request") {
-		t.Errorf("expected log to mention 'decoding request', got %q", result.Log)
-	}
-	t.Logf("Error log: %s", result.Log)
-}
-
-func TestProcessSayHello_UnknownFields(t *testing.T) {
-	e := &Extension{}
-
-	// DisallowUnknownFields is used in processSayHello — extra fields should fail
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash(config.OPCommandSayHello),
-		[]byte(`{"name":"Alice","extra":"field"}`),
-	)
-
-	status, body := e.processAction(action)
-
-	if status != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, status)
-	}
-
-	var result teetypes.ActionResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
-	}
-
-	if result.Status != 0 {
-		t.Fatalf("expected ActionResult.Status=0 (error for unknown field), got %d", result.Status)
-	}
-
-	t.Logf("Error log: %s", result.Log)
-}
-
-func TestProcessSayGoodbye_EmptyName(t *testing.T) {
-	e := &Extension{}
-
-	payload := abiEncodeSayGoodbye("", "some reason")
-	action := buildTestAction(
-		toHash(config.OPTypeGreeting),
-		toHash(config.OPCommandSayGoodbye),
-		payload,
-	)
-
-	status, body := e.processAction(action)
-
-	if status != http.StatusOK {
-		t.Fatalf("expected status %d, got %d", http.StatusOK, status)
-	}
-
-	var result teetypes.ActionResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
-	}
-
-	if result.Status != 0 {
-		t.Fatalf("expected ActionResult.Status=0 (error), got %d", result.Status)
-	}
-
-	if !contains(result.Log, "name must not be empty") {
-		t.Errorf("expected log to contain 'name must not be empty', got %q", result.Log)
-	}
-	t.Logf("Error log: %s", result.Log)
-}
-
-// --- State Tracking ---
-
-func TestProcessAction_GreetingCountIncrementsAcrossCalls(t *testing.T) {
-	e := &Extension{}
-
-	for i := 1; i <= 3; i++ {
-		payload, _ := json.Marshal(types.SayHelloRequest{Name: "Counter"})
-		action := buildTestAction(
-			toHash(config.OPTypeGreeting),
-			toHash(config.OPCommandSayHello),
-			payload,
-		)
-
-		status, body := e.processAction(action)
-		if status != http.StatusOK {
-			t.Fatalf("call %d: expected status %d, got %d", i, http.StatusOK, status)
-		}
-
-		var result teetypes.ActionResult
-		json.Unmarshal(body, &result)
-
-		var resp types.SayHelloResponse
-		json.Unmarshal(result.Data, &resp)
-
-		if resp.GreetingNumber != i {
-			t.Errorf("call %d: expected GreetingNumber=%d, got %d", i, i, resp.GreetingNumber)
+	for _, cmd := range []string{config.OPCommandPlaceBid, config.OPCommandCloseAuction} {
+		if !strings.Contains(bodyStr, cmd) || !strings.Contains(bodyStr, toHash(cmd).Hex()) {
+			t.Errorf("expected body to name %q and its hash", cmd)
 		}
 	}
 }
 
 func TestProcessAction_InvalidDataMessage(t *testing.T) {
-	e := &Extension{}
-
-	// Data.Message is not valid JSON — processorutils.Parse should fail
+	e := newTestExtension()
 	action := teetypes.Action{
 		Data: teetypes.ActionData{
 			ID:      common.HexToHash("0xabcd"),
@@ -398,19 +386,10 @@ func TestProcessAction_InvalidDataMessage(t *testing.T) {
 	}
 
 	status, body := e.processAction(action)
-
 	if status != http.StatusBadRequest {
-		t.Fatalf("expected status %d for invalid Data.Message, got %d: %s",
-			http.StatusBadRequest, status, body)
+		t.Fatalf("expected 400, got %d: %s", status, body)
 	}
-
-	bodyStr := string(body)
-	if !contains(bodyStr, "decoding fixed data") {
-		t.Errorf("expected body to mention 'decoding fixed data', got %q", bodyStr)
+	if !strings.Contains(string(body), "decoding fixed data") {
+		t.Errorf("expected body to mention 'decoding fixed data', got %q", body)
 	}
-	t.Logf("400 body: %s", bodyStr)
-}
-
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

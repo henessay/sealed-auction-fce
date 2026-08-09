@@ -6,7 +6,7 @@ import (
 	stderrors "errors"
 	"fmt"
 
-	"extension-scaffold/tools/pkg/support"
+	"sealed-auction/tools/pkg/support"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"

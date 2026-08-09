@@ -10,8 +10,8 @@ import (
 
 	"github.com/flare-foundation/go-flare-common/pkg/logger"
 
-	"extension-scaffold/internal/config"
-	extension "extension-scaffold/internal/extension"
+	"sealed-auction/internal/config"
+	extension "sealed-auction/internal/extension"
 )
 
 func main() {

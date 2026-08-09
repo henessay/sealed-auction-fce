@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"extension-scaffold/tools/pkg/contracts/helloworld"
-	"extension-scaffold/tools/pkg/support"
+	"sealed-auction/tools/pkg/contracts/sealedauction"
+	"sealed-auction/tools/pkg/support"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 )
@@ -26,7 +26,7 @@ func TestCheckTx_SuccessfulTx(t *testing.T) {
 		t.Fatalf("transactor: %v", err)
 	}
 
-	_, tx, _, err := helloworld.DeployHelloWorldInstructionSender(
+	_, tx, _, err := sealedauction.DeploySealedAuction(
 		opts, testSupport.ChainClient,
 		testSupport.Addresses.FlareTeeManager,
 		testSupport.Addresses.FlareTeeManager,

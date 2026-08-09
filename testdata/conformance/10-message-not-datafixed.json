@@ -1,0 +1,19 @@
+{
+  "description": "A valid-hex message that is not DataFixed JSON is 400",
+  "expect": {
+    "status": 400
+  },
+  "name": "10-message-not-datafixed",
+  "request": {
+    "body": {
+      "data": {
+        "id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "message": "0x6e6f74206a736f6e",
+        "submissionTag": "submit",
+        "type": "instruction"
+      }
+    },
+    "method": "POST",
+    "path": "/action"
+  }
+}

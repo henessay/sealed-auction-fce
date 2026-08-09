@@ -6,11 +6,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"extension-scaffold/tools/pkg/configs"
-	"extension-scaffold/tools/pkg/fccutils"
-	"extension-scaffold/tools/pkg/support"
-	instrutils "extension-scaffold/tools/pkg/utils"
-	"extension-scaffold/tools/pkg/validate"
+	"sealed-auction/tools/pkg/configs"
+	"sealed-auction/tools/pkg/fccutils"
+	"sealed-auction/tools/pkg/support"
+	instrutils "sealed-auction/tools/pkg/utils"
+	"sealed-auction/tools/pkg/validate"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/flare-foundation/go-flare-common/pkg/logger"

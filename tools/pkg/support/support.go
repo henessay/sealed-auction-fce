@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	stderrors "errors"
-	"extension-scaffold/tools/pkg/configs"
+	"sealed-auction/tools/pkg/configs"
 	"fmt"
 	"math/big"
 	"os"

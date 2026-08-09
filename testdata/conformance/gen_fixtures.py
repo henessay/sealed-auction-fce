@@ -5,11 +5,18 @@ The fixtures are committed; this script exists so the hex encodings are derived
 rather than hand-written, and so adding a case is a code edit rather than a
 manual hex-assembly exercise.
 
-Run with the python venv that has eth-abi installed:
-    ./python/.venv/bin/python testdata/conformance/gen_fixtures.py
+Run with any python3 that has eth-abi installed:
+    python3 testdata/conformance/gen_fixtures.py
 
-Each fixture is a single request/response pair asserted against every language
-implementation by scripts/test-conformance.sh. See docs/extension-contract.md.
+Each fixture is a single request/response pair asserted against the extension
+by scripts/test-conformance.sh. See docs/extension-contract.md.
+
+The suite runs against the extension ALONE — no tee-node, so no /decrypt.
+PLACE_BID success therefore cannot be covered here (it needs decryption); it is
+covered by Go unit tests with an injected decrypt, and end-to-end by test.sh.
+What this suite pins down: the CLOSE_AUCTION result encoding (the bytes
+settle() consumes), rejection paths that fire before decryption, and the
+HTTP/envelope contract.
 """
 
 from __future__ import annotations
@@ -24,6 +31,9 @@ HERE = pathlib.Path(__file__).parent
 ACTION_ID = "0x" + "11" * 32
 TEE_ID = "0x" + "22" * 20
 VERSION = "0.1.0"
+
+CONTRACT = "0x" + "aa" * 20
+ZERO_ADDR = "0x" + "00" * 20
 
 
 def b32(s: str) -> str:
@@ -63,28 +73,33 @@ def action(op_type: str, op_command: str, original: bytes, action_id: str = ACTI
     }
 
 
-def goodbye(name: str, reason: str) -> bytes:
-    return abi_encode(["(string,string)"], [(name, reason)])
+def place_bid_message(auction_id: int, bidder: str, ciphertext: bytes) -> bytes:
+    """ABI tuple matching Solidity PlaceBidMessage {uint256,address,bytes}."""
+    return abi_encode(["(uint256,address,bytes)"], [(auction_id, bidder, ciphertext)])
+
+
+def close_message(auction_id: int, contract: str, reserve: int, deadline: int) -> bytes:
+    """ABI tuple matching Solidity CloseMessage {uint256,address,uint256,uint64}."""
+    return abi_encode(["(uint256,address,uint256,uint64)"], [(auction_id, contract, reserve, deadline)])
+
+
+def auction_result(contract: str, auction_id: int, winner: str, price: int) -> bytes:
+    """Flat ABI tuple matching settle()'s abi.decode(data,(address,uint256,address,uint256))."""
+    return abi_encode(["address", "uint256", "address", "uint256"], [contract, auction_id, winner, price])
 
 
 def json_msg(obj) -> bytes:
-    """Serialize compactly, with no whitespace.
-
-    This matters for expected ActionResult.data: the comparison is byte-exact,
-    because tee-node hashes `data` (ActionResult.Hash computes keccak256 over
-    it) and signs the result. Go's encoding/json emits compact output with
-    struct-declaration field order; Python dicts and TS object literals preserve
-    insertion order, so all three implementations produce identical bytes.
-    """
+    """Serialize compactly, with no whitespace (byte-exact comparison — tee-node
+    hashes and signs ActionResult.data)."""
     return json.dumps(obj, separators=(",", ":")).encode("utf-8")
 
 
 FIXTURES: list[dict] = [
     {
-        "name": "01-say-hello-success",
-        "description": "SAY_HELLO with a JSON payload returns a greeting and counter 1",
+        "name": "01-close-auction-no-bids",
+        "description": "CLOSE_AUCTION with no stored bids returns winner=0 (contract cancels)",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_HELLO", json_msg({"name": "World"}))},
+                    "body": action("AUCTION", "CLOSE_AUCTION", close_message(1, CONTRACT, 0, 1700000000))},
         "expect": {
             "status": 200,
             "json": {
@@ -92,112 +107,80 @@ FIXTURES: list[dict] = [
                 "submissionTag": "submit",
                 "status": 1,
                 "log": "ok",
-                "opType": b32("GREETING"),
-                "opCommand": b32("SAY_HELLO"),
+                "opType": b32("AUCTION"),
+                "opCommand": b32("CLOSE_AUCTION"),
                 # hexutil.Bytes with no omitempty marshals as "0x", never absent.
                 "additionalResultStatus": "0x",
-                # Plain string, NOT bytes32 — contract §4.4. This single field is
-                # where the sign repo's Python and TS ports diverge from Go.
+                # Plain string, NOT bytes32 — contract §4.4.
                 "version": VERSION,
-                "data": to_hex(json_msg({"greeting": "Hello, World! Welcome to Flare Confidential Compute.",
-                                         "greetingNumber": 1})),
+                "data": to_hex(auction_result(CONTRACT, 1, ZERO_ADDR, 0)),
             },
         },
     },
     {
-        "name": "02-say-hello-counter-increments",
-        "description": "A second SAY_HELLO increments greetingNumber to 2",
+        "name": "02-close-auction-idempotent",
+        "description": "Re-closing the same auction reproduces the identical result (recovery path)",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_HELLO", json_msg({"name": "Second"}))},
+                    "body": action("AUCTION", "CLOSE_AUCTION", close_message(1, CONTRACT, 0, 1700000000))},
         "expect": {
             "status": 200,
             "json_subset": {
                 "status": 1,
-                "data": to_hex(json_msg({"greeting": "Hello, Second! Welcome to Flare Confidential Compute.",
-                                         "greetingNumber": 2})),
+                "data": to_hex(auction_result(CONTRACT, 1, ZERO_ADDR, 0)),
             },
         },
     },
     {
-        "name": "03-say-hello-empty-name",
-        "description": "Empty name is a handler error: HTTP 200, status 0, no data",
+        "name": "03-place-bid-empty-ciphertext",
+        "description": "PLACE_BID with an empty ciphertext is a handler error before decryption",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_HELLO", json_msg({"name": ""}))},
+                    "body": action("AUCTION", "PLACE_BID", place_bid_message(2, TEE_ID, b""))},
         "expect": {
             "status": 200,
-            # data is still emitted, as "0x" — the Go struct has no omitempty.
             "json_subset": {"status": 0, "data": "0x"},
-            "log_prefix": "error: ",
+            "log_prefix": "error: ciphertext must not be empty",
         },
     },
     {
-        "name": "04-say-hello-malformed-payload",
-        "description": "Non-JSON originalMessage is a handler error, not an HTTP error",
+        "name": "04-place-bid-malformed-abi",
+        "description": "A PLACE_BID originalMessage that is not the ABI wrapper is a handler error",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_HELLO", b"not json")},
+                    "body": action("AUCTION", "PLACE_BID", b"not abi at all")},
         "expect": {"status": 200, "json_subset": {"status": 0}, "log_prefix": "error: "},
     },
     {
-        "name": "05-say-goodbye-success",
-        "description": "SAY_GOODBYE decodes an ABI-encoded (string,string) payload",
+        "name": "05-place-bid-after-close",
+        "description": "A bid for an already-closed auction is rejected without decryption",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_GOODBYE", goodbye("World", "done"))},
+                    "body": action("AUCTION", "PLACE_BID", place_bid_message(1, TEE_ID, b"\x01\x02"))},
         "expect": {
             "status": 200,
-            "json_subset": {
-                "status": 1,
-                "log": "ok",
-                "opCommand": b32("SAY_GOODBYE"),
-                "version": VERSION,
-                "data": to_hex(json_msg({"farewell": "Goodbye, World! Reason: done",
-                                         "farewellNumber": 1})),
-            },
+            "json_subset": {"status": 0},
+            "log_prefix": "error: auction 1 already closed",
         },
     },
     {
-        "name": "06-say-goodbye-empty-reason-allowed",
-        "description": "Only name is validated; an empty reason succeeds",
-        "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_GOODBYE", goodbye("W", ""))},
-        "expect": {
-            "status": 200,
-            "json_subset": {
-                "status": 1,
-                "data": to_hex(json_msg({"farewell": "Goodbye, W! Reason: ", "farewellNumber": 2})),
-            },
-        },
-    },
-    {
-        "name": "07-say-goodbye-rejects-json",
-        "description": "SAY_GOODBYE is ABI-encoded; a JSON payload must not decode",
-        "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "SAY_GOODBYE", json_msg({"name": "W"}))},
-        "expect": {"status": 200, "json_subset": {"status": 0}, "log_prefix": "error: "},
-    },
-    {
-        "name": "08-unknown-op-type",
+        "name": "06-unknown-op-type",
         "description": "An unrouted opType is 501 with a plain-text body",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("NOT_A_REAL_TYPE", "SAY_HELLO", json_msg({"name": "W"}))},
-        # Go names the received vs expected opType, which is more useful than a
-        # bare string. The status code is contractual; the wording is not.
+                    "body": action("NOT_A_REAL_TYPE", "PLACE_BID", b"")},
         "expect": {"status": 501, "text_contains": "unsupported op type"},
     },
     {
-        "name": "09-unknown-op-command",
+        "name": "07-unknown-op-command",
         "description": "A known opType with an unrouted opCommand is also 501",
         "request": {"method": "POST", "path": "/action",
-                    "body": action("GREETING", "NOT_A_COMMAND", json_msg({"name": "W"}))},
+                    "body": action("AUCTION", "NOT_A_COMMAND", b"")},
         "expect": {"status": 501},
     },
     {
-        "name": "10-invalid-action-json",
+        "name": "08-invalid-action-json",
         "description": "A body that is not JSON is 400",
         "request": {"method": "POST", "path": "/action", "raw_body": "not json at all"},
         "expect": {"status": 400},
     },
     {
-        "name": "11-invalid-hex-in-message",
+        "name": "09-invalid-hex-in-message",
         "description": "A non-hex data.message is 400",
         "request": {
             "method": "POST", "path": "/action",
@@ -207,7 +190,7 @@ FIXTURES: list[dict] = [
         "expect": {"status": 400},
     },
     {
-        "name": "12-message-not-datafixed",
+        "name": "10-message-not-datafixed",
         "description": "A valid-hex message that is not DataFixed JSON is 400",
         "request": {
             "method": "POST", "path": "/action",
@@ -217,26 +200,26 @@ FIXTURES: list[dict] = [
         "expect": {"status": 400},
     },
     {
-        "name": "13-get-action-not-allowed",
+        "name": "11-get-action-not-allowed",
         "description": "GET /action is 405",
         "request": {"method": "GET", "path": "/action"},
         "expect": {"status": 405},
     },
     {
-        "name": "14-post-state-not-allowed",
+        "name": "12-post-state-not-allowed",
         "description": "POST /state is 405",
         "request": {"method": "POST", "path": "/state", "raw_body": ""},
         "expect": {"status": 405},
     },
     {
-        "name": "15-unknown-path",
+        "name": "13-unknown-path",
         "description": "An unknown path is 404",
         "request": {"method": "GET", "path": "/does-not-exist"},
         "expect": {"status": 404},
     },
     {
-        "name": "16-get-state",
-        "description": "GET /state returns bytes32 stateVersion and the accumulated state",
+        "name": "14-get-state",
+        "description": "GET /state returns bytes32 stateVersion and aggregate counters only",
         "request": {"method": "GET", "path": "/state"},
         "expect": {
             "status": 200,
@@ -244,10 +227,10 @@ FIXTURES: list[dict] = [
                 # Asymmetric with ActionResult.version by design — contract §4.5.
                 "stateVersion": b32(VERSION),
                 "state": {
-                    "greetingCount": 2,
-                    "lastGreeting": "Hello, Second! Welcome to Flare Confidential Compute.",
-                    "farewellCount": 2,
-                    "lastFarewell": "Goodbye, W! Reason: ",
+                    # No bid was accepted in this suite; auction 1 was closed.
+                    "auctionsTracked": 0,
+                    "auctionsClosed": 1,
+                    "bidsStored": 0,
                 },
             },
         },
@@ -256,6 +239,8 @@ FIXTURES: list[dict] = [
 
 
 def main() -> None:
+    for old in HERE.glob("*.json"):
+        old.unlink()
     index = []
     for f in FIXTURES:
         path = HERE / f"{f['name']}.json"

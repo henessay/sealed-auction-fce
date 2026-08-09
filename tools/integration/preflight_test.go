@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"extension-scaffold/tools/pkg/validate"
+	"sealed-auction/tools/pkg/validate"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )

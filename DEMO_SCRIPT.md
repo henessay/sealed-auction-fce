@@ -17,20 +17,37 @@ cd frontend && npx next start -p 3000    # if not already running
 - Deployer `0x284D5a5731C3Ea22C0E39472d5911FE8Ebb900D7` — holds ~7 FXRP, use it to place the **winning** bid.
 - Any second funded account for the **losing** bid (only needs C2FLR for gas; a losing bid never pays anything).
 
-**Demo auction.** Auction **#5** is live (seller `0x19f5C3491407291409D812Da48728A35aE3Ce9F3`,
-reserve 0.5 FXRP, deadline 2026-08-09 02:50 CEST). If it has expired, recreate
-in one command (seller key is in `.env.demo-seller.json`, gitignored):
+**Demo auction.** Auction **#4** is live on the escrow contract: seller
+`0x19f5C3491407291409D812Da48728A35aE3Ce9F3`, lot = **DemoAsset721 #5 held in
+escrow**, reserve 0.5 FXRP, deadline 30 minutes from creation
+(`0x27afe65e…31c5a5`). If it has expired, recreate it — mint, approve, create
+(seller key is in `.env.demo-seller.json`, gitignored):
 
 ```bash
 RPC=https://coston2-api.flare.network/ext/C/rpc
+SA=0x057c49831762029EA82c5644ff9D426D02486EeB
+NFT=0x6F7640AcbdCA0dfc4817C660928d02d0B3B6011E
+FXRP=0x0b6A3645c240605887a5532109323A3E12273dc7
+SELLER=$(python3 -c "import json; print(json.load(open('.env.demo-seller.json'))[0]['address'])")
 SPK=$(python3 -c "import json; print(json.load(open('.env.demo-seller.json'))[0]['private_key'])")
+set -a; source .env; set +a; PK="0x${DEPLOYMENT_PRIVATE_KEY#0x}"
+
+# Coston2 gas is ~650 gwei — keep the seller funded.
+cast send $SELLER --value 3000000000000000000 --private-key "$PK" --rpc-url $RPC
+# Mint the lot to the seller (deployer owns DemoAsset721), then escrow it.
+cast send $NFT "mint(address)" $SELLER --private-key "$PK" --rpc-url $RPC
+TOKENID=<id from the Transfer log>
+cast send $NFT "approve(address,uint256)" $SA $TOKENID --private-key "$SPK" --rpc-url $RPC
 NOW=$(cast block latest --field timestamp --rpc-url $RPC)
-cast send 0x5a468D17C292C262C4bAa0A953561bF31CDA79a0 \
-  "createAuction(string,address,uint64,uint256)" \
-  "Flare Summer Signal demo lot — hackathon collectible" \
-  0x0b6A3645c240605887a5532109323A3E12273dc7 $((NOW + 1800)) 500000 \
+cast send $SA "createAuction(string,uint8,address,uint256,uint256,address,uint64,uint256)" \
+  "Flare Summer Signal demo lot — tokenized collectible" \
+  0 $NFT $TOKENID 0 $FXRP $((NOW + 1800)) 500000 \
   --private-key "$SPK" --rpc-url $RPC
 ```
+
+You can also do all of this from the browser: the sidebar has a **Mint demo
+NFT** button (visible to the DemoAsset721 owner), and the create form runs the
+approve step for you.
 
 Tip: for a tighter recording, create it with `$((NOW + 300))` (5-minute deadline)
 right before the take, so the close happens on camera without waiting.
@@ -41,10 +58,11 @@ right before the take, so the close happens on camera without waiting.
 |---|-----|-----|
 | 1 | Frontend | http://localhost:3000 |
 | 2 | Diagram slide | `docs/architecture-diagram.svg` (open in browser, F11) |
-| 3 | Contract on explorer | https://coston2-explorer.flare.network/address/0x5a468D17C292C262C4bAa0A953561bF31CDA79a0 |
-| 4 | Backup: winning bid tx | https://coston2-explorer.flare.network/tx/0x213481bb3c0da61babeb254a4cd4ee73b51d40e59ebf51a9f04567d16f178fd3 |
-| 5 | Backup: losing bid tx | https://coston2-explorer.flare.network/tx/0x5fd884eb8497da248ded72c462eba333fedf9041ed52b202b192c7b1e647bec4 |
-| 6 | Backup: settle tx | https://coston2-explorer.flare.network/tx/0x2b8c709ea2135d6e649feac34b8f5cf2f2b39ec934d003cbe497e46e0c16426a |
+| 3 | Contract on explorer | https://coston2-explorer.flare.network/address/0x057c49831762029EA82c5644ff9D426D02486EeB |
+| 4 | Backup: winning bid tx | https://coston2-explorer.flare.network/tx/0xab0fd0ac24240295ee8be0ede4aa0b731960a377807125376d65025a98f48741 |
+| 5 | Backup: losing bid tx | https://coston2-explorer.flare.network/tx/0xb4550b0ee995b155d45bc7a43b38b2d70416d9a299445cbf3048a81bd161c66c |
+| 6 | Backup: settle tx (FXRP → seller **and** NFT → winner) | https://coston2-explorer.flare.network/tx/0x4ca99e3edad1db4064c58409ed9d9100e99bb9d034a660333828ef34b188797e |
+| 7 | Demo lot token | https://coston2-explorer.flare.network/address/0x6F7640AcbdCA0dfc4817C660928d02d0B3B6011E |
 
 ---
 
@@ -75,21 +93,25 @@ Flare's Confidential Compute gives us."
 
 **Screen:** tab 2 — `docs/architecture-diagram.svg`, full screen.
 
-**Say:** "SealedAuction is a Flare Confidential Extension. The bid amount is
-encrypted in your browser under the TEE's public key. The contract wraps the
-ciphertext with `msg.sender` — that's what authenticates the bidder, so nobody
-can spoof or replay someone else's ciphertext. The TEE decrypts bids only in
-enclave memory, picks the winner after the deadline, and signs the result.
-The chain never sees a plaintext bid — only the winner and the clearing price
-come out."
+**Say:** "SealedAuction is a Flare Confidential Extension. The seller escrows a
+real asset — here an NFT — into the contract when they create the auction, so
+bidders know the lot is really there. The bid amount is encrypted in your
+browser under the TEE's public key. The contract wraps the ciphertext with
+`msg.sender` — that's what authenticates the bidder, so nobody can spoof or
+replay someone else's ciphertext. The TEE decrypts bids only in enclave memory,
+picks the winner after the deadline, and signs the result. Settlement is an
+atomic swap: payment and asset move together or not at all."
 
 ## 0:50 — Live: two sealed bids (50s)
 
 **Screen:** tab 1 — frontend.
 
-1. Point at the demo auction card: state **Open**, countdown, reserve, pay
-   token **FTestXRP** — "the pay token is FXRP, Flare's bridged XRP FAsset,
-   resolved on-chain through the ContractRegistry."
+1. Point at the demo auction card: state **Open**, the green **Lot in escrow**
+   badge, the lot link (**SADEMO #5**), countdown, reserve, pay token
+   **FTestXRP** — "the lot is an NFT already held by the contract, and the pay
+   token is FXRP, Flare's bridged XRP FAsset, resolved on-chain through the
+   ContractRegistry." Optionally click the lot link and show `ownerOf` = the
+   auction contract.
 2. With the **losing** wallet: enter a low amount (e.g. `1`), click **Place
    sealed bid**. Narrate the status line: "encrypting in the browser… TEE
    accepted." 
@@ -103,8 +125,8 @@ a million. The amounts appear nowhere. The only public trace is a commitment
 hash and who participated."
 
 **Fallback:** if the live flow hiccups, tabs 4 and 5 are two real sealed-bid
-transactions from the recorded FXRP end-to-end run (auction #4) — identical
-story, calldata is 778 hex chars of ciphertext.
+transactions from the recorded escrow end-to-end run — identical story,
+calldata is 778 hex chars of ciphertext.
 
 ## 1:40 — Close, TEE result, settle (40s)
 
@@ -117,12 +139,16 @@ story, calldata is 778 hex chars of ciphertext.
    still secret — it was never decrypted anywhere outside the enclave, and it
    never will be published."
 3. With the winning (deployer) wallet click **Approve & settle** — two
-   MetaMask confirmations (ERC-20 approve, then settle).
-4. Open the settle tx: "settle() verified the TEE's secp256k1 signature
-   on-chain and moved the FXRP from winner to seller in the same transaction."
+   MetaMask confirmations (ERC-20 approve, then settle). The card then reads
+   "**You won SADEMO #5 for … FXRP — the lot is in your wallet.**"
+4. Open the settle tx and point at the two token transfers in one transaction:
+   "settle() verified the TEE's secp256k1 signature on-chain, then swapped:
+   FXRP from winner to seller, and the NFT out of escrow to the winner. Either
+   leg failing would revert both — the seller can never be paid without
+   delivering, and the buyer can never pay without receiving."
 
-**Fallback:** tab 6 — the recorded settle tx (auction #4, 3 FXRP
-winner → seller, TEE signature verified on-chain).
+**Fallback:** tab 6 — the recorded settle tx (3 FXRP winner → seller **and**
+DemoAsset721 #4 escrow → winner, TEE signature verified on-chain).
 
 ## 2:20 — Verify panel (20s)
 
@@ -141,14 +167,15 @@ on mainnet the same code hash would be attested by real TEE hardware."
 **Screen:** back to the diagram or the README.
 
 **Say:** "To recap the Flare integrations: this is a Flare Confidential
-Extension end to end — on-chain instructions, TEE compute, signed results.
-Settlement is in FXRP, resolved dynamically via the ContractRegistry and
-AssetManager, which makes it an interoperable-asset product, not just a
-confidentiality demo. We're honest about v1: bids live in enclave memory, the
-winner pays via allowance instead of a bond, and ties resolve first-come.
+Extension end to end — on-chain instructions, TEE compute, signed results. And
+it's a real asset trade: an NFT escrowed on-chain, swapped atomically against
+FXRP resolved dynamically via the ContractRegistry and AssetManager. That makes
+it an interoperable-asset product, not just a confidentiality demo. We're
+honest about v1: bids live in enclave memory, the seller's side is escrowed but
+the bidder pays via allowance instead of a bond, and ties resolve first-come.
 The roadmap: production TEE hardware, bid bonds, Secure-Random tie-breaks,
-and private reserve prices. Sealed-bid auctions with public-chain settlement —
-that's SealedAuction on Flare."
+and private reserve prices. Sealed bids, real settlement — that's SealedAuction
+on Flare."
 
 ---
 
@@ -156,12 +183,14 @@ that's SealedAuction on Flare."
 
 | Item | Value |
 |---|---|
-| SealedAuction | `0x5a468D17C292C262C4bAa0A953561bF31CDA79a0` |
+| SealedAuction | `0x057c49831762029EA82c5644ff9D426D02486EeB` |
 | Extension ID | 66042 (`0x…101fa`) |
-| TEE machine | `0x767F28A6B30EB9528C036378454Da1C2ea11E126` (status 2 = PRODUCTION) |
+| TEE machine | `0x91809e7b666558985093F00eF67565180519a7cC` (status 2 = PRODUCTION) |
 | FlareTeeManager | `0x1a9C4A0f9D76c0b1D91d22E24E573a9b377618aE` |
 | FXRP (FTestXRP, 6 decimals) | `0x0b6A3645c240605887a5532109323A3E12273dc7` |
-| Demo auction #5 seller | `0x19f5C3491407291409D812Da48728A35aE3Ce9F3` |
-| Demo auction #5 create tx | `0x797727053f5be961300ae816c27570da23577ba0cc867c88bd31d623adfc32b6` |
-| Backup bid txs (auction #4) | `0x5fd884eb…47bec4` (losing), `0x213481bb…178fd3` (winning) |
-| Backup settle tx (auction #4) | `0x2b8c709e…16426a` |
+| DemoAsset721 (lot token, symbol SADEMO) | `0x6F7640AcbdCA0dfc4817C660928d02d0B3B6011E` |
+| Demo auction #4 — seller | `0x19f5C3491407291409D812Da48728A35aE3Ce9F3` |
+| Demo auction #4 — lot | DemoAsset721 **#5**, escrowed by the contract |
+| Demo auction #4 — create tx | `0x27afe65e328ce0452752e75b2462ca277d31386ae1bd9432a97936487531c5a5` |
+| Backup bid txs (escrow run, auction #3) | `0xb4550b0e…61c66c` (losing), `0xab0fd0ac…f48741` (winning) |
+| Backup settle tx (escrow run, auction #3) | `0x4ca99e3e…8797e` — FXRP → seller **and** NFT #4 → winner |

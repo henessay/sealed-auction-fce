@@ -31,7 +31,9 @@ No `F_`-prefixed names; none of the reserved commands (`PAY`, `SIGN`, `VRF`, `RE
 ## Auction state machine
 
 ```
-                createAuction(lot, payToken, deadline, reservePrice)
+      createAuction(lot, lotKind, lotToken, lotTokenId/lotAmount,
+                    payToken, deadline, reservePrice)
+                    └─ pulls the lot into escrow; reverts → no auction
                                     │
                                     ▼
    cancelAuction                 ┌──────┐   placeBid × N        (while now < deadline)
@@ -54,11 +56,37 @@ No `F_`-prefixed names; none of the reserved commands (`PAY`, `SIGN`, `VRF`, `RE
 - **Open** — bids accepted. `placeBid` requires `block.timestamp < deadline`.
 - **Closing** — deadline passed, `closeAuction` sent a `CLOSE_AUCTION` instruction.
   Calling it again re-issues the instruction (recovery path); no state is lost on-chain.
-- **Settled** — TEE result verified; winner paid `clearingPrice` in `payToken` to seller.
+- **Settled** — TEE result verified; the atomic swap ran: winner paid `clearingPrice`
+  in `payToken` to the seller **and** received the escrowed lot, in one transaction.
 - **Cancelled** — either the seller cancelled a bidless auction, or the TEE reported
   no winner (no bids, or no bid ≥ reserve): `winner == address(0), clearingPrice == 0`.
+  Either way the escrowed lot is returned to the seller.
 
 One `SealedAuction` contract instance hosts many auctions (`auctionId` = array index).
+
+## Lot escrow
+
+The lot is a real token, not a description. `createAuction` pulls it into the
+contract in the same transaction that records the auction:
+
+| Lot kind | Pull on create | Release on settle/cancel |
+|---|---|---|
+| `LotKind.ERC721` | `transferFrom(seller → contract, tokenId)`, then `ownerOf` is asserted | `transferFrom(contract → winner \| seller)` |
+| `LotKind.ERC20` | `transferFrom(seller → contract, amount)`, **balance delta** is stored as `lotAmount` | `transfer(winner \| seller, lotAmount)` |
+
+Design notes:
+
+- **Escrow first, record second.** The pull happens before the auction is pushed
+  onto the array, so a failed pull (missing approval, wrong owner) leaves no
+  auction behind — bidders can never bid on a lot the contract does not hold.
+- **Balance-delta accounting** for ERC-20 lots means a fee-on-transfer token
+  escrows exactly what arrived; the winner receives what is actually held.
+- **Plain `transferFrom` on release, not `safeTransferFrom`.** A winner contract
+  without `onERC721Received` would otherwise be able to block settlement forever.
+  The contract still implements `onERC721Received` so lots can be pushed in.
+- **`nonReentrant` on every asset-moving entry point**, with terminal state always
+  written before the external calls (checks-effects-interactions).
+- The description string survives as human-readable metadata next to the token.
 
 ## Data flow 1: placeBid
 
@@ -128,13 +156,24 @@ Anyone                                Chain                            TEE exten
 7. poll ext-proxy for the signed ActionResult (same polling as weather frontend)
 8. settle(resultData, actionId, submissionTag, status, signature)
                                       9.  verify (see below), decode result
-                                      10. winner == 0  → state = Cancelled
-                                      11. winner != 0 → payToken.transferFrom(
-                                            winner, seller, clearingPrice);
-                                            state = Settled
+                                      10. winner == 0  → state = Cancelled,
+                                            lot released back to seller
+                                      11. winner != 0 → state = Settled, then the
+                                            ATOMIC SWAP in one tx:
+                                              a) payToken.transferFrom(
+                                                   winner → seller, clearingPrice)
+                                              b) lot released contract → winner
+                                            either leg reverting reverts both
                                       12. emit AuctionSettled(auctionId, winner,
                                             clearingPrice)   // first public reveal
 ```
+
+**Atomicity.** There is no window where the seller has been paid but the lot has
+not moved, or vice versa: both transfers execute inside `settle()`. If the winner
+lacks pay-token balance or allowance, the whole settlement reverts, the lot stays
+escrowed and the auction remains in `Closing` — the same signed TEE result can be
+replayed later once the winner funds their allowance (covered by
+`test_Settle_RevertsWithoutAllowanceAndKeepsLotEscrowed`).
 
 **Signature verification (identical to fce-weather-insurance, unmodified):**
 
@@ -194,7 +233,8 @@ property of the simulated mode, not a flaw of the design.
 frontend resolve FXRP dynamically via the FlareContractRegistry → AssetManager route
 on Coston2; if the FXRP faucet token misbehaves, we pass the WPT mock
 (`0x53192e788991AD96bC180249B15AefB94E597dD1`) instead — a config choice, not a code
-change. Settlement is a single `transferFrom(winner → seller, clearingPrice)`.
+change. Settlement pairs `transferFrom(winner → seller, clearingPrice)` with the
+escrowed lot moving to the winner in the same transaction.
 
 ## Known limitations (v1 — documented in README)
 
@@ -202,10 +242,12 @@ change. Settlement is a single `transferFrom(winner → seller, clearingPrice)`.
    between the first bid and closeAuction loses them; closeAuction then yields
    "no winner" → Cancelled. Acceptable for the demo; production would need
    encrypted persistence (e.g. sealed state via Redis) or bid re-submission.
-2. **No bid bonds / escrow.** The winner pays via `transferFrom` at settle, which
-   requires a prior `approve`. A winner who revoked approval (or never had funds)
-   makes `settle` revert; the recovery is re-running closeAuction/settle after the
-   TEE excludes nothing — i.e. the auction can stall. Production needs bid bonds
+2. **No bid bonds (the lot *is* escrowed).** The seller's side is fully
+   collateralized — the lot sits in the contract from creation. The bidder's side
+   is not: the winner pays via `transferFrom` at settle, which requires a prior
+   `approve`. A winner who revoked approval (or never had funds) makes `settle`
+   revert and the auction stalls in `Closing` with the lot safely escrowed (the
+   seller can never lose the asset, only time). Production needs bid bonds
    (deposit at placeBid, slash on non-payment). Stated honestly in the README.
 3. **Close/late-bid race.** placeBid is on-chain-gated by `deadline`, but instruction
    delivery is asynchronous; a bid mined just before the deadline could reach the TEE

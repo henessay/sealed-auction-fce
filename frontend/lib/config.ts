@@ -40,6 +40,25 @@ export const FLARE_TEE_MANAGER_ADDRESS = addressFromEnv(
   "0x1a9C4A0f9D76c0b1D91d22E24E573a9b377618aE",
 );
 
+/** Same address on every Flare network — entry point for FXRP resolution. */
+export const FLARE_CONTRACT_REGISTRY: Address =
+  "0xaD67FE66660Fb8dFE9d6b1b4240d8650e30F6019";
+
+/** Used only if the registry lookup fails; the resolver is the source of truth. */
+export const FXRP_FALLBACK_ADDRESS = addressFromEnv(
+  process.env.NEXT_PUBLIC_FXRP,
+  "0x0b6A3645c240605887a5532109323A3E12273dc7",
+);
+
+/**
+ * USDT0 as handed out by faucet.flare.network (10 per day) — "USDT0 test",
+ * 6 decimals. Not in the ContractRegistry, so it has to be pinned.
+ */
+export const USDT0_ADDRESS = addressFromEnv(
+  process.env.NEXT_PUBLIC_USDT0,
+  "0xC1A5B41512496B80903D1f32d6dEa3a73212E71F",
+);
+
 /** Canonical Multicall3 — deployed on Coston2, but absent from viem's chain def. */
 export const MULTICALL3_ADDRESS: Address =
   "0xcA11bde05977b3631167028862bE2a173976CA11";
@@ -52,6 +71,8 @@ export const INSTRUCTION_FEE_WEI = BigInt(
 export const EXPLORER_TX_URL = "https://coston2-explorer.flare.network/tx/";
 export const EXPLORER_ADDRESS_URL =
   "https://coston2-explorer.flare.network/address/";
+/** Blockscout v2 API — the last-resort NFT enumeration path (CORS is open). */
+export const EXPLORER_API_URL = "https://coston2-explorer.flare.network/api/v2";
 
 export function isConfigured(): boolean {
   return SEALED_AUCTION_ADDRESS !== zeroAddress;

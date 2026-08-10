@@ -12,7 +12,16 @@ import {
   sealedAuctionAbi,
 } from "@/lib/abi/sealedAuction";
 import { DEMO_ASSET_ADDRESS, SEALED_AUCTION_ADDRESS } from "@/lib/config";
+import {
+  type FriendlyError,
+  friendlyError,
+  UserInputError,
+} from "@/lib/errors";
 import { useTx } from "@/lib/hooks/useTx";
+import { ErrorNote } from "./ErrorNote";
+import { useTokenMeta } from "@/lib/tokens";
+import { NftPicker } from "./NftPicker";
+import { PayTokenPicker } from "./PayTokenPicker";
 
 export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
   const { address } = useAccount();
@@ -28,22 +37,34 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
   const [minutes, setMinutes] = useState("5");
   const [reserve, setReserve] = useState("");
   const [step, setStep] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   const isNft = lotKind === LOT_KIND_ERC721;
+  // ERC-20 lots: preview the amount in base units so decimals are never a guess.
+  const lotTokenMeta = useTokenMeta(isNft ? undefined : lotToken);
+  const payTokenMeta = useTokenMeta(payToken);
+  const lotAmountPreview = (() => {
+    if (isNft || !lotTokenMeta.data || !lotAmount.trim()) return null;
+    try {
+      const base = parseUnits(lotAmount.trim(), lotTokenMeta.data.decimals);
+      return `${lotAmount.trim()} ${lotTokenMeta.data.symbol} = ${base.toString()} base units (${lotTokenMeta.data.decimals} decimals)`;
+    } catch {
+      return "Amount is not a number";
+    }
+  })();
 
   function requireAddress(value: string, label: string): `0x${string}` {
     const trimmed = value.trim();
     if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed))
-      throw new Error(`${label} must be a contract address`);
+      throw new UserInputError(`${label} must be a contract address.`);
     return trimmed as `0x${string}`;
   }
 
   async function submit() {
     setError(null);
     try {
-      if (!publicClient) throw new Error("RPC not ready");
-      if (!lot.trim()) throw new Error("Lot description required");
+      if (!publicClient) throw new UserInputError("The RPC connection is not ready yet.");
+      if (!lot.trim()) throw new UserInputError("Describe the lot in one line.");
       const lotAddress = requireAddress(lotToken, "Lot token");
       const payAddress = requireAddress(payToken, "Pay token");
 
@@ -60,7 +81,7 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
       // allowance first — this is the "approve lot" step.
       if (isNft) {
         if (!/^\d+$/.test(lotTokenId.trim()))
-          throw new Error("Token id required for an NFT lot");
+          throw new UserInputError("Pick which NFT to put up as the lot.");
         tokenIdArg = BigInt(lotTokenId.trim());
         setStep("Approving the NFT for escrow…");
         await execute({
@@ -70,7 +91,7 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
           args: [SEALED_AUCTION_ADDRESS, tokenIdArg],
         });
       } else {
-        if (!lotAmount.trim()) throw new Error("Lot amount required");
+        if (!lotAmount.trim()) throw new UserInputError("Enter how many tokens make up the lot.");
         const lotDecimals = await publicClient.readContract({
           address: lotAddress,
           abi: erc20Abi,
@@ -88,7 +109,7 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
 
       const mins = Number(minutes);
       if (!Number.isFinite(mins) || mins <= 0)
-        throw new Error("Duration must be positive minutes");
+        throw new UserInputError("The auction duration must be a positive number of minutes.");
 
       // Anchor to chain time — local clocks skew vs block.timestamp.
       const head = await publicClient.getBlock();
@@ -122,7 +143,7 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
       setOpen(false);
       onCreated();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Create failed");
+      setError(friendlyError(e, "The auction could not be created."));
     } finally {
       setStep(null);
     }
@@ -173,40 +194,45 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
             Tokens (ERC-20)
           </button>
         </div>
-        <div className="grid gap-2 sm:grid-cols-2">
-          <input
-            className="input sm:col-span-2"
-            placeholder="Lot token address"
-            value={lotToken}
-            onChange={(e) => setLotToken(e.target.value)}
+        {isNft ? (
+          <NftPicker
+            collection={lotToken}
+            onCollectionChange={setLotToken}
+            tokenId={lotTokenId}
+            onTokenIdChange={setLotTokenId}
           />
-          {isNft ? (
+        ) : (
+          <div className="grid gap-2">
             <input
               className="input"
-              placeholder="Token id"
-              inputMode="numeric"
-              value={lotTokenId}
-              onChange={(e) => setLotTokenId(e.target.value)}
+              placeholder="ERC-20 lot token address (0x…)"
+              value={lotToken}
+              onChange={(e) => setLotToken(e.target.value)}
             />
-          ) : (
-            <input
-              className="input"
-              placeholder="Lot amount"
-              inputMode="decimal"
-              value={lotAmount}
-              onChange={(e) => setLotAmount(e.target.value)}
-            />
-          )}
-        </div>
+            <div className="flex items-center gap-2">
+              <input
+                className="input"
+                placeholder="Lot amount"
+                inputMode="decimal"
+                value={lotAmount}
+                onChange={(e) => setLotAmount(e.target.value)}
+              />
+              <span className="shrink-0 text-sm text-[var(--muted)]">
+                {lotTokenMeta.data?.symbol ?? "—"}
+              </span>
+            </div>
+            {lotAmountPreview && (
+              <p className="text-xs text-[var(--muted)]">{lotAmountPreview}</p>
+            )}
+          </div>
+        )}
       </fieldset>
 
+      <div className="mt-3">
+        <PayTokenPicker value={payToken} onChange={setPayToken} />
+      </div>
+
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
-        <input
-          className="input sm:col-span-2"
-          placeholder="Pay token address (e.g. FXRP)"
-          value={payToken}
-          onChange={(e) => setPayToken(e.target.value)}
-        />
         <input
           className="input"
           placeholder="Duration (minutes)"
@@ -216,7 +242,9 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
         />
         <input
           className="input"
-          placeholder="Reserve price (optional)"
+          placeholder={`Reserve price${
+            payTokenMeta.data ? ` in ${payTokenMeta.data.symbol}` : ""
+          } (optional)`}
           inputMode="decimal"
           value={reserve}
           onChange={(e) => setReserve(e.target.value)}
@@ -236,9 +264,7 @@ export function CreateAuctionForm({ onCreated }: { onCreated: () => void }) {
         </button>
       </div>
       {step && <p className="mt-2 text-xs text-[var(--amber)]">{step}</p>}
-      {error && (
-        <p className="mt-2 break-all text-xs text-[var(--red)]">{error}</p>
-      )}
+      <ErrorNote error={error} />
     </div>
   );
 }

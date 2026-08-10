@@ -27,6 +27,36 @@ export const erc20Abi = parseAbi([
   "function approve(address spender, uint256 amount) returns (bool)",
 ]);
 
+/** ContractRegistry → AssetManagerFXRP → fAsset(): dynamic FXRP resolution. */
+export const flareContractRegistryAbi = parseAbi([
+  "function getContractAddressByName(string name) view returns (address)",
+]);
+
+export const assetManagerAbi = parseAbi([
+  "function fAsset() view returns (address)",
+]);
+
+/** Plain ERC-721 surface any lot collection must implement. */
+export const erc721Abi = parseAbi([
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function balanceOf(address owner) view returns (uint256)",
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function getApproved(uint256 tokenId) view returns (address)",
+  "function approve(address to, uint256 tokenId)",
+]);
+
+/** Optional extensions probed while enumerating a seller's tokens. */
+export const erc721EnumerableAbi = parseAbi([
+  "function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)",
+  "function totalSupply() view returns (uint256)",
+]);
+
+/** Sequential-id mints (our DemoAsset721): ids run 1..nextTokenId-1. */
+export const sequentialMintAbi = parseAbi([
+  "function nextTokenId() view returns (uint256)",
+]);
+
 export const flareTeeManagerAbi = parseAbi([
   "function getTeeMachineStatus(address teeId) view returns (uint8)",
 ]);

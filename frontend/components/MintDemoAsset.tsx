@@ -7,7 +7,9 @@ import { useAccount, useReadContract } from "wagmi";
 import { demoAsset721Abi } from "@/lib/abi/sealedAuction";
 import { DEMO_ASSET_ADDRESS, EXPLORER_ADDRESS_URL } from "@/lib/config";
 import { shortenHash } from "@/lib/format";
+import { type FriendlyError, friendlyError } from "@/lib/errors";
 import { useTx } from "@/lib/hooks/useTx";
+import { ErrorNote } from "./ErrorNote";
 
 const transferEventAbi = parseAbi([
   "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
@@ -19,7 +21,7 @@ export function MintDemoAsset() {
   const { address } = useAccount();
   const { execute, isPending } = useTx();
   const [minted, setMinted] = useState<bigint | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<FriendlyError | null>(null);
 
   const { data: assetOwner } = useReadContract({
     address: DEMO_ASSET_ADDRESS,
@@ -60,12 +62,12 @@ export function MintDemoAsset() {
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Mint failed");
+      setError(friendlyError(e, "Minting the demo NFT failed."));
     }
   }
 
   return (
-    <section className="panel p-4">
+    <section className="panel p-4" id="mint-demo">
       <h2 className="mb-2 text-sm font-semibold">Demo asset (dev)</h2>
       <p className="mb-2 text-xs text-[var(--muted)]">
         Mint a{" "}
@@ -88,9 +90,7 @@ export function MintDemoAsset() {
           Minted token id {minted.toString()} — use it as the lot token id.
         </p>
       )}
-      {error && (
-        <p className="mt-2 break-all text-xs text-[var(--red)]">{error}</p>
-      )}
+      <ErrorNote error={error} />
     </section>
   );
 }

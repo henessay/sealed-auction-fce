@@ -67,8 +67,10 @@ export function AuctionList() {
 
   const active = auctions
     .filter((a) => ACTIVE_STATES.includes(a.data[9]))
-    // Nearest deadline first — what needs attention soonest is on top.
-    .sort((a, b) => Number(a.data[7] - b.data[7]));
+    // Newest first, same as Completed. Deadline order looked clever but put
+    // every new auction at the bottom (farthest deadline) and pinned expired
+    // Closing auctions to the top; a just-created auction must appear on top.
+    .sort((a, b) => Number(b.id - a.id));
   const completed = auctions
     .filter((a) => !ACTIVE_STATES.includes(a.data[9]))
     // No settlement timestamp on-chain; creation order is the proxy for recency.

@@ -156,7 +156,9 @@ Solidity tests incl. the full signature scheme against `vm.sign`).
   they fund). Production needs a deposit at `placeBid`, slashed on non-payment.
 - **Volatile TEE bid storage.** Bids live in extension process memory; a TEE
   restart between bidding and close loses them and the auction settles as
-  cancelled.
+  cancelled. The UI makes this visible rather than silent: every bid carries a
+  live TEE-confirmation badge, and the auction card warns while any bid is
+  unconfirmed — so a dying pipeline shows up before the close, not after.
 - **First-come tie-break** slightly rewards early bidding; Secure Random is
   the v2 fix.
 - **Participation and reserve are public** by design — only amounts are
@@ -195,7 +197,7 @@ test suites (Go table tests, 14 regenerated conformance fixtures, 24 forge
 tests), the Next.js frontend (sealed bid form with in-browser ECIES, lot escrow
 UI, auction lifecycle, TEE verify panel), and all documentation.
 
-## Field notes: three things FXRP taught us
+## Field notes from Coston2
 
 Real FAsset settlement broke our mock-tested code three times; each fix is in
 the repo and worth knowing before you integrate FXRP:
@@ -213,9 +215,17 @@ the repo and worth knowing before you integrate FXRP:
    and then dies at runtime with `ReentrancySentryOOG`. Pin an explicit gas
    limit with headroom (we use 200k) for direct FXRP transfers.
 
-And one from the FCC side:
+And two more from building the UI on Coston2:
 
-4. **A restarted TEE container is a new machine — retire the old one.** In
+4. **Coston2's public RPC caps `eth_getLogs` at 30 blocks.** The usual
+   browser-side trick for listing an address's NFTs — replaying `Transfer`
+   logs — is simply unavailable. The lot picker therefore probes
+   `tokenOfOwnerByIndex` first, falls back to an `ownerOf` sweep over
+   `nextTokenId()`/`totalSupply()` in a single Multicall3 call, and only then
+   asks the Blockscout index. Multicall3 *is* deployed at its canonical address
+   on Coston2, but viem's `flareTestnet` chain definition omits it, so the
+   address has to be passed explicitly.
+5. **A restarted TEE container is a new machine — retire the old one.** In
    simulated mode the node generates a fresh key on boot, so a Docker restart
    silently orphans the on-chain registration: the old `teeId` still reads
    `PRODUCTION` while its key no longer exists anywhere. Because

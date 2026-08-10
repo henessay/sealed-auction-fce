@@ -45,9 +45,11 @@ cast send $SA "createAuction(string,uint8,address,uint256,uint256,address,uint64
   --private-key "$SPK" --rpc-url $RPC
 ```
 
-You can also do all of this from the browser: the sidebar has a **Mint demo
-NFT** button (visible to the DemoAsset721 owner), and the create form runs the
-approve step for you.
+You can also do all of this from the browser, without pasting a single address:
+the sidebar has a **Mint demo NFT** button (visible to the DemoAsset721 owner),
+the create form lists the NFTs your wallet owns in a dropdown, offers
+**FXRP / USDT0 / Custom…** as pay-token presets (FXRP resolved on chain), and
+runs the approve step for you.
 
 Tip: for a tighter recording, create it with `$((NOW + 300))` (5-minute deadline)
 right before the take, so the close happens on camera without waiting.

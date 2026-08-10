@@ -11,6 +11,19 @@ export const RPC_URL =
   process.env.NEXT_PUBLIC_RPC_URL ??
   "https://coston2-api.flare.network/ext/C/rpc";
 
+/**
+ * Tried in order; the first that answers wins, and a failing one is skipped.
+ * Both were verified to serve chainId 114. Override with a comma-separated
+ * NEXT_PUBLIC_RPC_URLS to put a private endpoint first.
+ */
+export const RPC_URLS: string[] = (
+  process.env.NEXT_PUBLIC_RPC_URLS ??
+  `${RPC_URL},https://rpc.ankr.com/flare_coston2`
+)
+  .split(",")
+  .map((url) => url.trim())
+  .filter(Boolean);
+
 export const SEALED_AUCTION_ADDRESS = addressFromEnv(
   process.env.NEXT_PUBLIC_SEALED_AUCTION,
   "0x057c49831762029EA82c5644ff9D426D02486EeB",
@@ -26,6 +39,10 @@ export const FLARE_TEE_MANAGER_ADDRESS = addressFromEnv(
   process.env.NEXT_PUBLIC_FLARE_TEE_MANAGER,
   "0x1a9C4A0f9D76c0b1D91d22E24E573a9b377618aE",
 );
+
+/** Canonical Multicall3 — deployed on Coston2, but absent from viem's chain def. */
+export const MULTICALL3_ADDRESS: Address =
+  "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 /** Native fee forwarded with each placeBid/closeAuction instruction. */
 export const INSTRUCTION_FEE_WEI = BigInt(

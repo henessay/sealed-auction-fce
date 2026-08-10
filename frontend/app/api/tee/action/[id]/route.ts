@@ -6,12 +6,29 @@ const MAX_ATTEMPTS = 15;
 const RETRY_MS = 2000;
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   const { id } = await context.params;
   const instructionId = id.startsWith("0x") ? id : `0x${id}`;
   const path = `/action/result/${instructionId}`;
+
+  // ?peek=1 — single shot, used by the per-bid TEE status indicators. It must
+  // never block: "no result yet" and "proxy down" are answers, not failures.
+  if (new URL(request.url).searchParams.get("peek") === "1") {
+    const probe = await proxyGet(path);
+    if (probe.ok) {
+      const payload = probe.data as { result?: { status?: number } };
+      if (payload?.result?.status === 1) return NextResponse.json(probe.data);
+      return NextResponse.json({ pending: true }, { status: 404 });
+    }
+    // No HTTP status on any attempt means we never reached the proxy at all.
+    const reachable = probe.attempts.some((a) => a.status !== undefined);
+    return NextResponse.json(
+      { pending: true, error: probe.message },
+      { status: reachable ? 404 : 503 },
+    );
+  }
 
   let lastError = "Action result not ready";
 

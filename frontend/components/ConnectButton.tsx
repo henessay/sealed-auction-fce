@@ -1,7 +1,7 @@
 "use client";
 
 import { useAccount, useConnect, useDisconnect, useSwitchChain } from "wagmi";
-import { flareTestnet } from "viem/chains";
+import { coston2 } from "@/lib/wagmi";
 
 import { shortenAddress } from "@/lib/format";
 
@@ -11,7 +11,7 @@ export function ConnectButton() {
   const { disconnect } = useDisconnect();
   const { switchChain, isPending: isSwitching } = useSwitchChain();
 
-  const wrongNetwork = isConnected && chain?.id !== flareTestnet.id;
+  const wrongNetwork = isConnected && chain?.id !== coston2.id;
   const injected = connectors[0];
 
   if (!isConnected) {
@@ -20,7 +20,7 @@ export function ConnectButton() {
         className="btn"
         disabled={isConnecting}
         onClick={() =>
-          injected && connect({ connector: injected, chainId: flareTestnet.id })
+          injected && connect({ connector: injected, chainId: coston2.id })
         }
       >
         {isConnecting ? "Connecting…" : "Connect wallet"}
@@ -33,7 +33,7 @@ export function ConnectButton() {
       <button
         className="btn"
         disabled={isSwitching}
-        onClick={() => switchChain({ chainId: flareTestnet.id })}
+        onClick={() => switchChain({ chainId: coston2.id })}
       >
         {isSwitching ? "Switching…" : "Switch to Coston2"}
       </button>

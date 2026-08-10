@@ -14,7 +14,9 @@ import {
   SEALED_AUCTION_ADDRESS,
 } from "@/lib/config";
 import { shortenHash } from "@/lib/format";
+import { friendlyError } from "@/lib/errors";
 import { fetchTeeInfo, teeAddressFromPublicKey } from "@/lib/tee/proxy";
+import { ErrorNote } from "./ErrorNote";
 
 function decodePlatform(platform: Hex): string {
   try {
@@ -41,37 +43,45 @@ export function VerifyPanel() {
   } = useQuery({
     queryKey: ["tee-info"],
     queryFn: fetchTeeInfo,
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   });
 
   const teeId = info ? teeAddressFromPublicKey(info.machineData.publicKey) : undefined;
 
-  const { data: machineStatus } = useReadContract({
+  const { data: machineStatus, error: statusError } = useReadContract({
     address: FLARE_TEE_MANAGER_ADDRESS,
     abi: flareTeeManagerAbi,
     functionName: "getTeeMachineStatus",
     args: teeId ? [teeId] : undefined,
-    query: { enabled: !!teeId, refetchInterval: 30_000 },
+    query: { enabled: !!teeId, refetchInterval: 60_000, retry: false },
   });
 
-  const statusLabel =
-    machineStatus !== undefined
+  // The lookup reverts for an unknown teeId — that is the signature of a
+  // restarted container whose fresh key was never registered on-chain.
+  const unregistered = !!teeId && !!statusError;
+  const statusLabel = unregistered
+    ? "UNREGISTERED"
+    : machineStatus !== undefined
       ? (MACHINE_STATUS_LABELS[Number(machineStatus)] ?? `#${machineStatus}`)
       : undefined;
+  const healthy = statusLabel === "PRODUCTION";
 
   return (
-    <section className="panel p-4">
+    <section className="panel p-4" id="verify">
       <div className="mb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold">TEE verification</h2>
         {statusLabel && (
           <span
             className="badge"
             style={{
-              background:
-                statusLabel === "PRODUCTION"
-                  ? "color-mix(in srgb, var(--green) 15%, transparent)"
-                  : "color-mix(in srgb, var(--amber) 15%, transparent)",
-              color: statusLabel === "PRODUCTION" ? "var(--green)" : "var(--amber)",
+              background: `color-mix(in srgb, ${
+                healthy ? "var(--green)" : unregistered ? "var(--red)" : "var(--amber)"
+              } 15%, transparent)`,
+              color: healthy
+                ? "var(--green)"
+                : unregistered
+                  ? "var(--red)"
+                  : "var(--amber)",
             }}
           >
             {statusLabel}
@@ -79,14 +89,23 @@ export function VerifyPanel() {
         )}
       </div>
 
+      {unregistered && (
+        <p className="mb-2 text-xs text-[var(--red)]">
+          The live TEE key is not a registered machine — instructions will never
+          be answered. Re-run <span className="mono">post-build.sh</span> and
+          pause the stale machine(s).
+        </p>
+      )}
+
       {isLoading && (
         <p className="text-xs text-[var(--muted)]">Fetching TEE /info…</p>
       )}
-      {error && (
-        <p className="text-xs text-[var(--red)]">
-          {error instanceof Error ? error.message : "TEE info unavailable"}
-        </p>
-      )}
+      <ErrorNote
+        error={
+          error ? friendlyError(error, "The TEE proxy did not answer.") : null
+        }
+        className="mt-0"
+      />
 
       {info && (
         <div className="divide-y divide-[var(--border)]">

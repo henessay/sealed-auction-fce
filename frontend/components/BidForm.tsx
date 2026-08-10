@@ -5,10 +5,21 @@ import { decodeEventLog, parseUnits } from "viem";
 import { useAccount } from "wagmi";
 
 import { sealedAuctionAbi } from "@/lib/abi/sealedAuction";
-import { INSTRUCTION_FEE_WEI, SEALED_AUCTION_ADDRESS } from "@/lib/config";
+import {
+  EXPLORER_TX_URL,
+  INSTRUCTION_FEE_WEI,
+  SEALED_AUCTION_ADDRESS,
+} from "@/lib/config";
+import { type FriendlyError, friendlyError } from "@/lib/errors";
 import { useTx } from "@/lib/hooks/useTx";
 import { buildBidCiphertext } from "@/lib/tee/ecies";
-import { fetchTeeInfo, pollActionResult } from "@/lib/tee/proxy";
+import {
+  fetchTeeInfo,
+  pollActionResult,
+  TeeResultUnavailableError,
+} from "@/lib/tee/proxy";
+import { ErrorNote } from "./ErrorNote";
+import { InfoDot } from "./ui";
 
 type Props = {
   auctionId: bigint;
@@ -21,7 +32,9 @@ type Step =
   | { phase: "idle" }
   | { phase: "working"; label: string }
   | { phase: "accepted" }
-  | { phase: "error"; message: string };
+  /** Transaction mined, TEE silent — a pipeline problem, not a user error. */
+  | { phase: "unconfirmed"; hash: `0x${string}` | null }
+  | { phase: "error"; error: FriendlyError };
 
 export function BidForm({
   auctionId,
@@ -42,14 +55,29 @@ export function BidForm({
     try {
       amountWei = parseUnits(amount, tokenDecimals);
     } catch {
-      setStep({ phase: "error", message: "Invalid amount" });
+      setStep({
+        phase: "error",
+        error: {
+          message: "That is not a valid amount.",
+          details: "",
+          transient: false,
+        },
+      });
       return;
     }
     if (amountWei <= 0n) {
-      setStep({ phase: "error", message: "Amount must be positive" });
+      setStep({
+        phase: "error",
+        error: {
+          message: "The bid amount must be greater than zero.",
+          details: "",
+          transient: false,
+        },
+      });
       return;
     }
 
+    let bidHash: `0x${string}` | null = null;
     try {
       setStep({ phase: "working", label: "Fetching TEE public key…" });
       const info = await fetchTeeInfo();
@@ -71,6 +99,7 @@ export function BidForm({
         args: [auctionId, ciphertext],
         value: INSTRUCTION_FEE_WEI,
       });
+      bidHash = receipt.transactionHash;
 
       let instructionId: `0x${string}` | null = null;
       for (const log of receipt.logs) {
@@ -102,10 +131,16 @@ export function BidForm({
       setAmount("");
       onBidAccepted();
     } catch (e) {
-      setStep({
-        phase: "error",
-        message: e instanceof Error ? e.message : "Bid failed",
-      });
+      // The bid is mined and the commitment is on-chain; only the TEE leg is
+      // missing. Say exactly that instead of surfacing a proxy status code,
+      // and still refresh so the bid shows up with a pending TEE badge.
+      if (e instanceof TeeResultUnavailableError) {
+        setStep({ phase: "unconfirmed", hash: bidHash });
+        setAmount("");
+        onBidAccepted();
+        return;
+      }
+      setStep({ phase: "error", error: friendlyError(e, "The bid failed.") });
     }
   }
 
@@ -129,9 +164,14 @@ export function BidForm({
         </button>
       </div>
       <p className="mt-2 text-xs text-[var(--muted)]">
-        The amount is encrypted in your browser under the TEE key — only an
-        opaque ciphertext goes on-chain. Approve this contract on the pay token
-        for at least your bid, or a winning bid cannot settle.
+        {address ? (
+          <>
+            Encrypted in your browser — only ciphertext goes on-chain
+            <InfoDot title="Anyone except the seller may bid until the deadline. Approve this contract on the pay token for at least your bid, or a winning bid cannot settle." />
+          </>
+        ) : (
+          "Connect a wallet to place a sealed bid."
+        )}
       </p>
       {step.phase === "working" && (
         <p className="mt-2 text-xs text-[var(--amber)]">{step.label}</p>
@@ -141,9 +181,30 @@ export function BidForm({
           Sealed bid accepted by the TEE ✓
         </p>
       )}
-      {step.phase === "error" && (
-        <p className="mt-2 break-all text-xs text-[var(--red)]">{step.message}</p>
+      {step.phase === "unconfirmed" && (
+        <p className="mt-2 text-xs text-[var(--amber)]">
+          Bid is on-chain, but TEE confirmation hasn&apos;t arrived — the
+          extension may be unreachable.{" "}
+          <a className="underline" href="#verify">
+            Check service status
+          </a>
+          .
+          {step.hash && (
+            <>
+              {" "}
+              <a
+                className="text-[var(--accent-soft)] hover:underline"
+                href={`${EXPLORER_TX_URL}${step.hash}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                bid tx ↗
+              </a>
+            </>
+          )}
+        </p>
       )}
+      {step.phase === "error" && <ErrorNote error={step.error} />}
     </div>
   );
 }

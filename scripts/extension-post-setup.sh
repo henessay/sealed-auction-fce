@@ -54,8 +54,39 @@ log "EXTENSION_ID:       ${EXTENSION_ID:-<not set>}"
 log "INSTRUCTION_SENDER: ${INSTRUCTION_SENDER:-<not set>}"
 log "CHAIN_URL:          ${CHAIN_URL:-<not set>}"
 
-# --- Add your extension-specific post-registration setup below ---
-# The Hello World scaffold has no post-registration setup. Replace this with
-# your own logic if your extension needs the TEE address on-chain.
+# --- Sync SealedAuction.teeAddress with the registered TEE machine ---
+# settle() verifies the TEE result signature with ecrecover against
+# teeAddress; after a machine rotation the contract still trusts the dead
+# key and every settlement reverts with "bad TEE signature" until this runs.
+# Idempotent: reads before writing.
 
-log "No extension-specific post-setup needed (Hello World scaffold)."
+: "${INSTRUCTION_SENDER:?INSTRUCTION_SENDER not set (config/extension.env)}"
+: "${EXTENSION_ID:?EXTENSION_ID not set (config/extension.env)}"
+CHAIN_URL="${CHAIN_URL:-https://coston2-api.flare.network/ext/C/rpc}"
+ADDRESSES_FILE="${ADDRESSES_FILE:-$PROJECT_DIR/config/coston2/deployed-addresses.json}"
+# Resolve relative paths against PROJECT_DIR (not caller's cwd)
+[[ "$ADDRESSES_FILE" == /* ]] || ADDRESSES_FILE="$PROJECT_DIR/$ADDRESSES_FILE"
+
+# Machine calls route through the FlareTeeManager diamond, not the standalone
+# TeeMachineRegistry (which this deployment does not use).
+FLARE_TEE_MANAGER="$(jq -r '.[] | select(.name == "FlareTeeManager") | .address' "$ADDRESSES_FILE")"
+[[ -n "$FLARE_TEE_MANAGER" && "$FLARE_TEE_MANAGER" != null ]] \
+    || { echo "FlareTeeManager not found in $ADDRESSES_FILE" >&2; exit 1; }
+
+# After reconcile-tee the only active machine for our extension is the live one.
+live_tee=$(cast call "$FLARE_TEE_MANAGER" \
+    "getActiveTeeMachines(uint256)(address[],string[])" "$EXTENSION_ID" \
+    --rpc-url "$CHAIN_URL" | head -1 | tr -d '[]' | cut -d, -f1 | xargs)
+[[ -n "$live_tee" && "$live_tee" != "0x0000000000000000000000000000000000000000" ]] \
+    || { echo "No active TEE machine for extension $EXTENSION_ID — run reconcile-tee first" >&2; exit 1; }
+
+current_tee=$(cast call "$INSTRUCTION_SENDER" "teeAddress()(address)" --rpc-url "$CHAIN_URL")
+
+if [[ "${live_tee,,}" == "${current_tee,,}" ]]; then
+    log "SealedAuction.teeAddress already matches live TEE $live_tee"
+else
+    log "Updating SealedAuction.teeAddress: $current_tee -> $live_tee"
+    cast send "$INSTRUCTION_SENDER" "setTeeAddress(address)" "$live_tee" \
+        --rpc-url "$CHAIN_URL" --private-key "$DEPLOYMENT_PRIVATE_KEY" >/dev/null
+    log "teeAddress updated"
+fi

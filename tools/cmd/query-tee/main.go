@@ -15,7 +15,10 @@ import (
 
 func main() {
 	rpc := flag.String("rpc", "https://coston2-api.flare.network/ext/C/rpc", "rpc url")
-	reg := flag.String("reg", "0x5918Cd58e5caf755b8584649Aa24077822F87613", "TeeMachineRegistry address")
+	// Default is the Coston2 FlareTeeManager diamond (config/coston2/
+	// deployed-addresses.json) — machine calls route through its facet. The old
+	// standalone registry default answered but held nothing for our extension.
+	reg := flag.String("reg", "0x1a9C4A0f9D76c0b1D91d22E24E573a9b377618aE", "FlareTeeManager (diamond) address")
 	listExt := flag.Int64("ext", -1, "list active TEEs in extension id (e.g. 0 for FTDC, 1588 for user)")
 	flag.Parse()
 

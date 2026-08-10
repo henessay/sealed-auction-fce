@@ -337,6 +337,16 @@ if [[ "$USE_LOCAL" == "false" ]]; then
         fi
     fi
 
+    # The TEE machine key is generated in memory on every container boot and
+    # cannot be persisted; if compose recreated the container, the on-chain
+    # registration now points at a dead key and every instruction goes
+    # unanswered until it is re-registered. Reconcile on every start so a
+    # recreate is a non-event instead of a silent outage.
+    if [[ "$CHAIN" != "local" ]]; then
+        log "Reconciling on-chain TEE registration with the live key..."
+        "$SCRIPT_DIR/reconcile-tee.sh" || die "TEE registration reconcile failed — instructions will go unanswered until scripts/reconcile-tee.sh succeeds"
+    fi
+
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN} Services started (Docker Compose)${NC}"

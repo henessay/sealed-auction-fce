@@ -226,9 +226,13 @@ And two more from building the UI on Coston2:
    on Coston2, but viem's `flareTestnet` chain definition omits it, so the
    address has to be passed explicitly.
 5. **A restarted TEE container is a new machine — retire the old one.** In
-   simulated mode the node generates a fresh key on boot, so a Docker restart
-   silently orphans the on-chain registration: the old `teeId` still reads
-   `PRODUCTION` while its key no longer exists anywhere. Because
+   simulated mode the node generates a fresh key on boot — in memory only,
+   inside tee-node's internal packages, so no docker volume can persist it. A
+   Docker restart silently orphans the on-chain registration: the old `teeId`
+   still reads `PRODUCTION` while its key no longer exists anywhere.
+   `scripts/reconcile-tee.sh` (run automatically by `start-services.sh` on
+   coston/coston2) converges this on every boot: it registers the live key if
+   needed and pauses our stale machines. Because
    `getRandomTeeIds` round-robins across *all* PRODUCTION machines for the
    extension, instructions then land on the ghost machine and results 404
    forever. Re-run `post-build.sh` to register the new key, then
